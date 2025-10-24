@@ -1,0 +1,72 @@
+# Docker Compose for a single-node Kafka 4.0.0 cluster in KRaft mode
+# VERSION 3: With corrected single-line commands in init script
+version: '3.8'
+
+services:
+  kafka:
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    container_name: kafka-broker
+    ports:
+      - "9093:9093"
+    volumes:
+      - "kafka_data:/bitnami/kafka"
+    environment:
+      # --- KRaft Configuration ---
+      - KAFKA_CFG_NODE_ID=1
+      - KAFKA_CFG_PROCESS_ROLES=broker,controller
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9094
+
+      # --- Listener Configuration ---
+      - KAFKA_CFG_LISTENERS=INTERNAL://:9092,EXTERNAL://:9093,CONTROLLER://:9094
+      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka:9092,EXTERNAL://localhost:9093
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
+
+      # --- Cluster & Topic Configuration ---
+      - KAFKA_CLUSTER_ID=mR__5yE4SgGkI-gLmswYNA
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
+      - KAFKA_CFG_NUM_PARTITIONS=3
+
+  # MODIFIED: Commands are now on a single line to prevent shell errors
+  init-kafka:
+    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
+    container_name: init-kafka
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # A robust wait-loop to ensure Kafka is ready
+      echo 'Waiting for Kafka to be ready...'
+      until kafka-topics.sh --bootstrap-server kafka:9092 --list; do
+        echo 'Kafka not ready yet, sleeping for 2 seconds...'
+        sleep 2
+      done
+      
+      echo 'Kafka is up! Creating topics...'
+      
+      # Create the 'urls-to-crawl' topic on a single line
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic urls-to-crawl --partitions 16 --replication-factor 1
+        
+      # Create the 'crawl-results' topic on a single line
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic crawl-results --partitions 8 --replication-factor 1
+        
+      echo 'Topics created successfully.'
+      "
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    depends_on:
+      - init-kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: arachne-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+
+volumes:
+  kafka_data:
+    driver: local

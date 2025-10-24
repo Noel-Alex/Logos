@@ -1,0 +1,25 @@
+[package]
+name = "web_crawler"
+version = "0.1.0"
+edition = "2024"
+default-run = "web_crawler"
+
+[[bin]]
+name="stress-test-kafka"
+path = "src/kafka_stress_test.rs"
+
+[dependencies]
+reqwest = { version = "0.12.5", features = ["rustls-tls", "brotli"] } # Added brotli for better compression support
+scraper = "0.19.0"
+tokio = { version = "1.38.0", features = ["full"] }
+url = "2.5.2"
+# robotstxt = "0.12.0" # We'll keep this commented for now as requested, but it's vital for a real-world crawler
+futures = "0.3.30"
+anyhow = "1.0.86"
+serde = { version = "1.0", features = ["derive"] } # For saving/loading state
+serde_json = "1.0" # For JSON format
+sha2 = "0.10.8" # To create unique filenames from URLs
+hex = "0.4.3" # To format the hash for filenames
+openssl = { version = "*", features = ["vendored"] }
+rdkafka = { version = "*", features = ["cmake-build"] }
+chrono = "0.4.41"
