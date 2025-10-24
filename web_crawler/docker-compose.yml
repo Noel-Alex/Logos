@@ -1,6 +1,5 @@
 # Docker Compose for a single-node Kafka 4.0.0 cluster in KRaft mode
 # VERSION 3: With corrected single-line commands in init script
-version: '3.8'
 
 services:
   kafka:
@@ -67,6 +66,30 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       DYNAMIC_CONFIG_ENABLED: 'true'
 
+  scylla:
+    image: scylladb/scylla:latest
+    container_name: scylla
+    ports:
+      # Expose the native CQL port to your host machine
+      - "9042:9042"
+    volumes:
+      # This named volume will persist the database data on your host
+      - scylla_data:/var/lib/scylla
+    command:
+      # --smp 1 limits it to one core
+      # --developer-mode 1 allows it to run without special tuning
+      # --memory 1G allocates 1GB of RAM
+      --smp 1 --developer-mode 1 --memory 1G
+    healthcheck:
+      # Checks if the node is up and normal using nodetool
+      test: ["CMD-SHELL", "nodetool status | grep '^UN'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+
 volumes:
   kafka_data:
+    driver: local
+  scylla_data:
     driver: local

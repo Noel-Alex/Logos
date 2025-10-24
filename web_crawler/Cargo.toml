@@ -1,8 +1,8 @@
 [package]
-name = "web_crawler"
+name = "arachne"
 version = "0.1.0"
 edition = "2024"
-default-run = "web_crawler"
+default-run = "arachne"
 
 [[bin]]
 name="stress-test-kafka"
@@ -23,3 +23,7 @@ hex = "0.4.3" # To format the hash for filenames
 openssl = { version = "*", features = ["vendored"] }
 rdkafka = { version = "*", features = ["cmake-build"] }
 chrono = "0.4.41"
+dotenvy = "0.15.7"
+robotparser = "0.11"
+thiserror = "1.0"
+scylla = { version = "*"}
