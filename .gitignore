@@ -1,3 +1,5 @@
 /target
-/web_crawler/target
+/Arachne/target
 /.idea
+.env
+Arachne/.env

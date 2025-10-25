@@ -29,11 +29,11 @@ async fn setup_schema(session: &Session) -> Result<()> {
     println!("Setting up database schema...");
 
     let keyspace_cql = "
-        CREATE KEYSPACE IF NOT EXISTS web_crawler
+        CREATE KEYSPACE IF NOT EXISTS Arachne
         WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
 
     let table_cql = "
-        CREATE TABLE IF NOT EXISTS web_crawler.crawled_pages (
+        CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
             source_url TEXT PRIMARY KEY,
             content TEXT,
             content_type TEXT,
@@ -42,7 +42,7 @@ async fn setup_schema(session: &Session) -> Result<()> {
 
     // Use the standard `query` method
     session.query_unpaged(keyspace_cql, &[]).await?;
-    println!("Keyspace 'web_crawler' is ready.");
+    println!("Keyspace 'Arachne' is ready.");
 
     // Use the standard `query` method
     session.query_unpaged(table_cql, &[]).await?;
@@ -55,7 +55,7 @@ async fn setup_schema(session: &Session) -> Result<()> {
 /// Inserts or updates a crawled page's data in the database.
 async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<()> {
     let insert_cql = "
-        INSERT INTO web_crawler.crawled_pages
+        INSERT INTO Arachne.crawled_pages
         (source_url, content, content_type, http_status_code)
         VALUES (?, ?, ?, ?)";
 

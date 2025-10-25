@@ -6,7 +6,7 @@ edition = "2024"
 [workspace]
 
 members = [
-    "web_crawler",
+    "Arachne",
 ]
 
 
