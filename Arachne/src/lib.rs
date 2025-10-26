@@ -1,4 +1,10 @@
 use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use std::env;
+use chrono::{DateTime, Utc, NaiveDateTime};
+pub mod db;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CrawlResult {

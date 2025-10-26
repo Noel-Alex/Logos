@@ -5,6 +5,7 @@ use std::env;
 // Use chrono for timestamp handling
 use chrono::{DateTime, Utc, NaiveDateTime};
 
+
 #[derive(Debug)]
 pub struct CrawledPage {
     pub source_url: String,
@@ -14,18 +15,20 @@ pub struct CrawledPage {
 }
 
 /// Establishes a connection to the database and returns a Session.
-async fn connect_to_db() -> Result<Session> {
+pub async fn connect_to_db() -> Result<Session> {
     let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
     println!("Connecting to ScyllaDB at {}...", uri);
 
     let session = SessionBuilder::new().known_node(uri).build().await?;
 
     println!("Connection successful.");
+
+    setup_schema(&session).await.unwrap();
     Ok(session)
 }
 
 /// Sets up the necessary keyspace and table in the database.
-async fn setup_schema(session: &Session) -> Result<()> {
+pub async fn setup_schema(session: &Session) -> Result<()> {
     println!("Setting up database schema...");
 
     let keyspace_cql = "
@@ -53,7 +56,7 @@ async fn setup_schema(session: &Session) -> Result<()> {
 }
 
 /// Inserts or updates a crawled page's data in the database.
-async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<()> {
+pub async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<()> {
     let insert_cql = "
         INSERT INTO Arachne.crawled_pages
         (source_url, content, content_type, http_status_code)
@@ -77,10 +80,10 @@ async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<()> {
     Ok(())
 }
 
+/*
 #[tokio::main]
 async fn main() -> Result<()> {
     let session = connect_to_db().await?;
-    setup_schema(&session).await?;
 
     // --- DEMONSTRATION ---
     let page1 = CrawledPage {
@@ -110,3 +113,4 @@ async fn main() -> Result<()> {
     println!("\nScript finished successfully.");
     Ok(())
 }
+*/

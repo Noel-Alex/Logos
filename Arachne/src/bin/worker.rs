@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use url::{ParseError, Url};
+use arachne::db;
 
 #[derive(Debug, thiserror::Error)]
 enum CrawlerError {
@@ -37,6 +38,8 @@ fn parse_links(source_url: &str, html: &str) -> Vec<String> {
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
+    db::connect_to_db().await.expect("Scylla db connection failed");
+
 
     // --- Configuration ---
     let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not implemented");
