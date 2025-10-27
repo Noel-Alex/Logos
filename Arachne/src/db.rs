@@ -1,3 +1,5 @@
+//db.rs
+
 use anyhow::Result;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;

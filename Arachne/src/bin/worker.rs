@@ -42,7 +42,7 @@ async fn main() {
 
 
     // --- Configuration ---
-    let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not implemented");
+    let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not in .env");
     let consume_topic = "urls-to-crawl";
     let produce_topic = "crawl-results";
     let group_id = "arachne-worker-group";
@@ -52,6 +52,7 @@ async fn main() {
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
         .set("auto.offset.reset", "earliest")
+        .set("fetch.message.max.bytes", "104857600")
         .create()
         .expect("Consumer creation failed");
 

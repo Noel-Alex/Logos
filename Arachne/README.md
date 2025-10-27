@@ -22,7 +22,7 @@ The architecture of Arachne is guided by three core principles:
 
 Arachne consists of four primary components that work in concert:
 
-![[Untitled diagram-2025-10-16-141028.png]]
+![img.png](img.png)
 
 1.  **Coordinator Node:** The brain of the operation. It manages the master state of the crawl.
     *   **URL Frontier:** Prioritizes which URLs should be crawled next.
@@ -65,7 +65,7 @@ The entire Arachne stack is containerized for simple, one-command initialization
 2.  **Initialize the infrastructure:**
     This command will start Kafka and ScyllaDB services in the background.
     ```bash
-    docker-compose up -d
+    docker-compose up
     ```
 
 3.  **Build and run the Rust components:**

@@ -22,7 +22,7 @@ Logos is engineered with a philosophy of precision, craftsmanship, and speed at 
 
 Logos is comprised of three distinct but interconnected subsystems, each with a name reflecting its philosophical purpose.
 
-![[Untitled diagram-2025-10-16-141204.png]]
+![img.png](img.png)
 
 1.  **The Artificer (Indexing Pipeline):** A skilled craftsman that forges the raw data into a structured index.
     *   **Ingestion:** Consumes the `crawl-results` stream from Kafka.
