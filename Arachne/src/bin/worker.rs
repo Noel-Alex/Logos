@@ -26,20 +26,65 @@ enum CrawlerError {
 }
 
 
-// This is a simplified parser. In reality, you'd use a crate like `scraper`.
-fn parse_links(source_url: &str, html: &str) -> Vec<String> {
-    // Basic placeholder link parsing
-    // A real implementation needs to handle relative URLs, different tags, etc.
-    println!("(Parsing links from {})", source_url);
-    vec!["https://www.rust-lang.org/learn".to_string()] // Dummy data
+
+/// Asynchronously crawls a given URL, returning the page content and discovered links.
+///
+/// # Arguments
+/// * `client` - A `reqwest::Client` to make HTTP requests.
+/// * `url_str` - The URL to crawl.
+///
+/// # Returns
+/// A `Result` containing a `CrawlResult` on success or a specific `CrawlerError` on failure.
+async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, CrawlerError> {
+    let base_url = Url::parse(url_str)?;
+
+    // Make the HTTP request
+    let response = client.get(base_url.clone()).send().await?;
+
+    // Check for non-successful status codes (e.g., 404, 500)
+    if !response.status().is_success() {
+        return Ok(CrawlResult {
+            source_url: url_str.to_string(),
+            status: CrawlStatus::HttpError(response.status().as_u16()),
+            content: None,
+            discovered_urls: vec![],
+        });
+    }
+
+    // Await the response body as text
+    let body = response.text().await?;
+    let document = Html::parse_document(&body);
+    // This selector is static and known to be valid, so .unwrap() is safe.
+    let selector = Selector::parse("a[href]").unwrap();
+
+    let mut found_links = HashSet::new(); // Use a HashSet to automatically handle duplicates
+
+    for element in document.select(&selector) {
+        if let Some(href) = element.value().attr("href") {
+            // Join the found href with the base URL to resolve relative links (e.g., "/about")
+            if let Ok(mut new_url) = base_url.join(href) {
+                // Remove the fragment part (e.g., #section-name) from the URL
+                new_url.set_fragment(None);
+                found_links.insert(new_url.to_string());
+            }
+        }
+    }
+
+    // If we've reached here, the crawl was successful.
+    Ok(CrawlResult {
+        source_url: url_str.to_string(),
+        status: CrawlStatus::Success,
+        content: Some(body), // Include the HTML content
+        discovered_urls: found_links.into_iter().collect(),
+    })
 }
 
 
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
-    db::connect_to_db().await.expect("Scylla db connection failed");
-
+    // Assuming connect_to_db is an async function you have defined
+    // db::connect_to_db().await.expect("Scylla db connection failed");
 
     // --- Configuration ---
     let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not in .env");
@@ -52,7 +97,6 @@ async fn main() {
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
         .set("auto.offset.reset", "earliest")
-        .set("fetch.message.max.bytes", "104857600")
         .create()
         .expect("Consumer creation failed");
 
@@ -64,65 +108,61 @@ async fn main() {
         .create()
         .expect("Producer creation failed");
 
+    // --- Create a reusable reqwest client ---
+    let http_client = Client::new();
+
     println!("Worker started. Waiting for URLs...");
 
     // --- Main Worker Loop ---
     loop {
         match consumer.recv().await {
-            Ok(msg) => {
-                let payload = match msg.payload_view::<str>() {
+            Err(e) => eprintln!("Kafka error: {}", e),
+            Ok(m) => {
+                let payload = match m.payload_view::<str>() {
+                    None => {
+                        eprintln!("Message with empty payload");
+                        continue; // Skip this message
+                    },
                     Some(Ok(s)) => s,
-                    _ => {
-                        eprintln!("Error reading message payload");
-                        continue;
+                    Some(Err(e)) => {
+                        eprintln!("Error viewing message payload as string: {}", e);
+                        continue; // Skip this message
                     }
                 };
-                let url_to_fetch = payload.to_string();
-                println!("RECEIVED URL: {}", url_to_fetch);
 
-                // 1. FETCH
-                let result = match reqwest::get(&url_to_fetch).await {
-                    Ok(response) => {
-                        if response.status().is_success() {
-                            let body = response.text().await.unwrap_or_default();
-                            // 2. PARSE (simplified)
-                            let new_links = parse_links(&url_to_fetch, &body);
-                            CrawlResult {
-                                source_url: url_to_fetch,
-                                status: CrawlStatus::Success,
-                                content: Some(body), // You might not want to send the whole body back
-                                discovered_urls: new_links,
-                            }
-                        } else {
-                            CrawlResult {
-                                source_url: url_to_fetch,
-                                status: CrawlStatus::HttpError(response.status().as_u16()),
-                                content: None,
-                                discovered_urls: vec![],
-                            }
+                let source_url = payload.to_string();
+                println!("Received URL to crawl: {}", source_url);
+
+                // Perform the web crawling and parsing
+                let crawl_result = match crawl_url(&http_client, &source_url).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        // This branch handles fundamental fetch errors like DNS failure, timeouts,
+                        // or issues with the URL itself.
+                        eprintln!("CrawlerError for {}: {}", source_url, e);
+                        CrawlResult {
+                            source_url: source_url.clone(),
+                            status: CrawlStatus::FetchError(e.to_string()),
+                            content: None,
+                            discovered_urls: vec![],
                         }
-                    }
-                    Err(e) => CrawlResult {
-                        source_url: url_to_fetch,
-                        status: CrawlStatus::FetchError(e.to_string()),
-                        content: None,
-                        discovered_urls: vec![],
                     },
                 };
 
-                // 3. REPORT RESULTS
-                let result_json = serde_json::to_string(&result).unwrap();
-                let record = FutureRecord::to(produce_topic)
-                    .payload(&result_json)
-                    .key(&result.source_url); // Key by the original URL
+                // Serialize the result to JSON
+                let result_json = serde_json::to_string(&crawl_result)
+                    .expect("Failed to serialize CrawlResult to JSON");
 
-                println!("REPORTING RESULT for {}", result.source_url);
-                if let Err((e, _)) = producer.send(record, Duration::from_secs(0)).await {
-                    eprintln!("Error sending result: {}", e);
+                // Create a record for the results topic
+                let record = FutureRecord::to(produce_topic)
+                    .key(&source_url)
+                    .payload(&result_json);
+
+                // Send the result to Kafka
+                match producer.send(record, Duration::from_secs(0)).await {
+                    Ok(_) => println!("Successfully produced crawl result for {}", source_url),
+                    Err((e, _)) => eprintln!("Failed to produce Kafka message for {}: {}", source_url, e),
                 }
-            }
-            Err(e) => {
-                eprintln!("Kafka error: {}", e);
             }
         }
     }
