@@ -97,6 +97,7 @@ async fn main() {
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
         .set("auto.offset.reset", "earliest")
+        .set("enable.auto.commit", "false")
         .create()
         .expect("Consumer creation failed");
 
@@ -105,6 +106,11 @@ async fn main() {
     // --- Create Kafka Producer ---
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
+        .set("queue.buffering.max.messages", "100000")
+        .set("linger.ms", "1000")
+        .set("batch.size", "6553600")
+        .set("compression.type", "lz4")
+        .set("acks", "1")
         .create()
         .expect("Producer creation failed");
 
@@ -160,8 +166,19 @@ async fn main() {
 
                 // Send the result to Kafka
                 match producer.send(record, Duration::from_secs(0)).await {
-                    Ok(_) => println!("Successfully produced crawl result for {}", source_url),
-                    Err((e, _)) => eprintln!("Failed to produce Kafka message for {}: {}", source_url, e),
+                    Ok(_) => {
+                        println!("Successfully produced crawl result for {}", source_url);
+
+                        // ---- NEW PART: Manually commit the offset ----
+                        // We only commit AFTER we know the result was produced.
+                        if let Err(e) = consumer.commit_message(&m, rdkafka::consumer::CommitMode::Async) {
+                            eprintln!("Failed to commit offset: {}", e);
+                        }
+                    },
+                    Err((e, _)) => {
+                        eprintln!("Failed to produce Kafka message for {}: {}", source_url, e);
+                        // We DO NOT commit here, so the message will be re-processed later.
+                    }
                 }
             }
         }

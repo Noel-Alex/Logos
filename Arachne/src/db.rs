@@ -1,20 +1,12 @@
-//db.rs
-
 use anyhow::Result;
+use scylla::statement::batch::Batch;
+use scylla::statement::prepared::PreparedStatement;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use std::env;
-// Use chrono for timestamp handling
-use chrono::{DateTime, Utc, NaiveDateTime};
+use crate::{CrawlResult, CrawlStatus};
 
 
-#[derive(Debug)]
-pub struct CrawledPage {
-    pub source_url: String,
-    pub content: String,
-    pub content_type: String,
-    pub http_status_code: i32,
-}
 
 /// Establishes a connection to the database and returns a Session.
 pub async fn connect_to_db() -> Result<Session> {
@@ -41,7 +33,6 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
         CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
             source_url TEXT PRIMARY KEY,
             content TEXT,
-            content_type TEXT,
             http_status_code INT
         )";
 
@@ -58,11 +49,11 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
 }
 
 /// Inserts or updates a crawled page's data in the database.
-pub async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<()> {
+pub async fn add_crawled_page(session: &Session, page: &CrawlResult) -> Result<()> {
     let insert_cql = "
         INSERT INTO Arachne.crawled_pages
-        (source_url, content, content_type, http_status_code)
-        VALUES (?, ?, ?, ?)";
+        (source_url, content, http_status_code)
+        VALUES (?, ?, ?)";
 
     let prepared = session.prepare(insert_cql).await?;
 
@@ -70,9 +61,7 @@ pub async fn add_crawled_page(session: &Session, page: &CrawledPage) -> Result<(
     let values = (
         &page.source_url,
         &page.content,
-        &page.content_type,
-//        Utc::now(), // chrono::DateTime<Utc> can now be serialized
-        page.http_status_code,
+        &page.status,
     );
 
     // Use the standard `execute` method

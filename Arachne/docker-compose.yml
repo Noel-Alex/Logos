@@ -46,10 +46,10 @@ services:
       echo 'Kafka is up! Creating topics...'
       
       # Create the 'urls-to-crawl' topic on a single line
-      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic urls-to-crawl --partitions 16 --replication-factor 1
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic urls-to-crawl --partitions 160 --replication-factor 1
         
       # Create the 'crawl-results' topic on a single line
-      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic crawl-results --partitions 8 --replication-factor 1
+      kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic crawl-results --partitions 16 --replication-factor 1
         
       echo 'Topics created successfully.'
       "
@@ -79,7 +79,7 @@ services:
       # --smp 1 limits it to one core
       # --developer-mode 1 allows it to run without special tuning
       # --memory 1G allocates 1GB of RAM
-      --smp 1 --developer-mode 1 --memory 1G
+      --smp 16 --developer-mode 1 --memory 4G
     healthcheck:
       # Checks if the node is up and normal using nodetool
       test: ["CMD-SHELL", "nodetool status | grep '^UN'"]

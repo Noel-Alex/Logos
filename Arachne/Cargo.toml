@@ -26,4 +26,4 @@ chrono = "0.4.41"
 dotenvy = "0.15.7"
 robotparser = "0.11"
 thiserror = "1.0"
-scylla = { version = "*"}
+scylla = { version = "*", features=["chrono-04"]}
