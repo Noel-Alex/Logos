@@ -1,3 +1,4 @@
+//db.rs
 use anyhow::Result;
 use scylla::statement::batch::Batch;
 use scylla::statement::prepared::PreparedStatement;
@@ -57,11 +58,10 @@ pub async fn add_crawled_page(session: &Session, page: &CrawlResult) -> Result<(
 
     let prepared = session.prepare(insert_cql).await?;
 
-    // This now works because the "chrono" feature is enabled in Cargo.toml
     let values = (
         &page.source_url,
         &page.content,
-        &page.status,
+        page.status.as_i32(),
     );
 
     // Use the standard `execute` method

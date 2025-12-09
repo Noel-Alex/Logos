@@ -1,3 +1,4 @@
+//lib.rs
 use serde::{Deserialize, Serialize};
 use anyhow::Result;
 use scylla::client::session::Session;
@@ -19,4 +20,19 @@ pub enum CrawlStatus {
     Success,
     HttpError(u16),
     FetchError(String),
+}
+
+impl CrawlStatus {
+    /// Converts the status to an integer for database storage.
+    /// Returns 200 for Success, the actual code for HttpError,
+    /// and 0 for FetchError (DNS/Network issues).
+    pub fn as_i32(&self) -> i32 {
+        match self {
+            CrawlStatus::Success => 200,
+            CrawlStatus::HttpError(code) => *code as i32,
+            // We use 0 to represent a non-HTTP error (like DNS failure)
+            // since your DB schema only has an INT column.
+            CrawlStatus::FetchError(_) => 0,
+        }
+    }
 }
