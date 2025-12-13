@@ -1,37 +1,47 @@
-use rdkafka::consumer::{Consumer, StreamConsumer, CommitMode};
+// src/bin/worker.rs
+use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::message::Message;
 use rdkafka::ClientConfig;
-use tokio::time::Duration;
-use tokio::sync::Semaphore; // Import Semaphore
+use tokio::time::{self, Duration};
 use arachne::{CrawlResult, CrawlStatus};
 use std::env;
-use std::sync::Arc;
-use reqwest;
-use wreq::{Client, ClientBuilder};
-use wreq_util::Emulation;
+
+use reqwest::Client;
 use scraper::{Html, Selector};
 use std::collections::HashSet;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use url::{ParseError, Url};
+use arachne::db;
 
 #[derive(Debug, thiserror::Error)]
 enum CrawlerError {
     #[error("Request error: {0}")]
-    RequestError(#[from] wreq::Error),
-//    RequestError(#[from] rquest::Error),
+    RequestError(#[from] reqwest::Error),
     #[error("URL parsing error: {0}")]
     UrlParseError(#[from] ParseError),
+    #[error("Robots.txt parsing error")]
+    RobotsParseError,
 }
 
-/// (Kept your original logic, just ensuring it's efficient)
+
+
+/// Asynchronously crawls a given URL, returning the page content and discovered links.
+///
+/// # Arguments
+/// * `client` - A `reqwest::Client` to make HTTP requests.
+/// * `url_str` - The URL to crawl.
+///
+/// # Returns
+/// A `Result` containing a `CrawlResult` on success or a specific `CrawlerError` on failure.
 async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, CrawlerError> {
     let base_url = Url::parse(url_str)?;
 
-    // Set a timeout for the request so slow sites don't hang a worker slot forever
-    let response = client.get(base_url.clone())
-        .timeout(Duration::from_secs(10))
-        .send().await?;
+    // Make the HTTP request
+    let response = client.get(base_url.clone()).send().await?;
 
+    // Check for non-successful status codes (e.g., 404, 500)
     if !response.status().is_success() {
         return Ok(CrawlResult {
             source_url: url_str.to_string(),
@@ -41,35 +51,40 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
         });
     }
 
-    let body = response.text().await.unwrap();
-
-    // Parsing happens here (CPU bound task)
-    // In a massive scale system, we might spawn_blocking here, but for now this is fine.
+    // Await the response body as text
+    let body = response.text().await?;
     let document = Html::parse_document(&body);
+    // This selector is static and known to be valid, so .unwrap() is safe.
     let selector = Selector::parse("a[href]").unwrap();
 
-    let mut found_links = HashSet::new();
+    let mut found_links = HashSet::new(); // Use a HashSet to automatically handle duplicates
 
     for element in document.select(&selector) {
         if let Some(href) = element.value().attr("href") {
+            // Join the found href with the base URL to resolve relative links (e.g., "/about")
             if let Ok(mut new_url) = base_url.join(href) {
+                // Remove the fragment part (e.g., #section-name) from the URL
                 new_url.set_fragment(None);
                 found_links.insert(new_url.to_string());
             }
         }
     }
 
+    // If we've reached here, the crawl was successful.
     Ok(CrawlResult {
         source_url: url_str.to_string(),
         status: CrawlStatus::Success,
-        content: Some(body),
+        content: Some(body), // Include the HTML content
         discovered_urls: found_links.into_iter().collect(),
     })
 }
 
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
+    // Assuming connect_to_db is an async function you have defined
+    // db::connect_to_db().await.expect("Scylla db connection failed");
 
     // --- Configuration ---
     let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not in .env");
@@ -77,132 +92,94 @@ async fn main() {
     let produce_topic = "crawl-results";
     let group_id = "arachne-worker-group";
 
-    // --- CONCURRENCY CONTROL ---
-    // This allows 50 URLs to be processed at the EXACT same time.
-    // Increase this if you have more RAM/CPU, decrease if you get banned.
-    let max_concurrent_crawls = 50;
-    let semaphore = Arc::new(Semaphore::new(max_concurrent_crawls));
-
     // --- Create Kafka Consumer ---
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
         .set("auto.offset.reset", "earliest")
-        .set("enable.auto.commit", "true") // We switch to auto-commit for speed/simplicity in parallel mode
-        .set("auto.commit.interval.ms", "5000")
+        .set("enable.auto.commit", "false")
         .create()
         .expect("Consumer creation failed");
 
     consumer.subscribe(&[consume_topic]).expect("Can't subscribe");
 
     // --- Create Kafka Producer ---
-    // Producers are thread-safe and cheap to clone
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
         .set("queue.buffering.max.messages", "100000")
-        .set("linger.ms", "100")
-        .set("batch.size", "1048576")
+        .set("linger.ms", "1000")
+        .set("batch.size", "6553600")
         .set("compression.type", "lz4")
-        .set("message.max.bytes", "10485760") // 10MB limit support
         .set("acks", "1")
         .create()
         .expect("Producer creation failed");
 
-    // --- Create HTTP Client ---
-    // Clients are thread-safe and cheap to clone
-        let http_client = Client::builder()
-        .emulation(Emulation::Chrome137)
-        .build().unwrap();
+    // --- Create a reusable reqwest client ---
+    let http_client = Client::new();
 
-/*    let http_client = Client::builder()
-        //.user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .user_agent("Arachne/1.0")
-        //.timeout(Duration::from_secs(15))
-        // 3. Handle Redirects
-        // Many sites redirect http -> https or www -> non-www. Follow them.
-        //.redirect(reqwest::redirect::Policy::limited(5))
-        // 4. SSL/TLS Lenience
-        // Some older sites have expired certs. We still want to crawl them.
-        //.danger_accept_invalid_certs(true)// Time just to establish the TCP connection
-        //.connect_timeout(Duration::from_secs(8)) // Be polite, identify yourself
-        //.connect_timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-*/
-    println!("Worker started (Concurrent Mode: {} slots). Waiting for URLs...", max_concurrent_crawls);
+    println!("Worker started. Waiting for URLs...");
 
-    // --- High Speed Loop ---
+    // --- Main Worker Loop ---
     loop {
-        // 1. Acquire a permit.
-        // If 50 tasks are running, this line WAITS until one finishes.
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-
         match consumer.recv().await {
-            Err(e) => {
-                eprintln!("Kafka error: {}", e);
-                // If we errored reading from Kafka, we don't need the permit.
-                drop(permit);
-            }
+            Err(e) => eprintln!("Kafka error: {}", e),
             Ok(m) => {
-                // 2. Extract Data immediately
-                // We must extract the string NOW because we can't pass the borrowed message to a thread.
                 let payload = match m.payload_view::<str>() {
-                    Some(Ok(s)) => s.to_string(), // Clone to String
-                    _ => { drop(permit); continue; }
+                    None => {
+                        eprintln!("Message with empty payload");
+                        continue; // Skip this message
+                    },
+                    Some(Ok(s)) => s,
+                    Some(Err(e)) => {
+                        eprintln!("Error viewing message payload as string: {}", e);
+                        continue; // Skip this message
+                    }
                 };
 
-                // 3. Clone required resources for the task
-                let producer_clone = producer.clone();
-                let client_clone = http_client.clone();
-                let produce_topic = produce_topic.to_string(); // Clone string for the thread
+                let source_url = payload.to_string();
+                println!("Received URL to crawl: {}", source_url);
 
-                // 4. SPAWN THE TASK
-                // This block runs in the background. The main loop immediately goes back to get the next URL.
-                tokio::spawn(async move {
-                    // The permit is moved here. It will be dropped (and released) when this block ends.
-                    let _permit = permit;
-
-                    // println!("Crawling: {}", payload); // Optional: Comment out for max speed
-
-                    let crawl_result = match crawl_url(&client_clone, &payload).await {
-                        Ok(res) => res,
-                        Err(e) => {
-                            eprintln!("Failed {}: {}", payload, e);
-                            CrawlResult {
-                                source_url: payload.clone(),
-                                status: CrawlStatus::FetchError(e.to_string()),
-                                content: None,
-                                discovered_urls: vec![],
-                            }
+                // Perform the web crawling and parsing
+                let crawl_result = match crawl_url(&http_client, &source_url).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        // This branch handles fundamental fetch errors like DNS failure, timeouts,
+                        // or issues with the URL itself.
+                        eprintln!("CrawlerError for {}: {}", source_url, e);
+                        CrawlResult {
+                            source_url: source_url.clone(),
+                            status: CrawlStatus::FetchError(e.to_string()),
+                            content: None,
+                            discovered_urls: vec![],
                         }
-                    };
+                    },
+                };
 
-                    // Handle Message Size issues (Lite version fallback)
-                    let result_json = serde_json::to_string(&crawl_result).unwrap();
-                    let record = FutureRecord::to(&produce_topic)
-                        .key(&payload)
-                        .payload(&result_json);
+                // Serialize the result to JSON
+                let result_json = serde_json::to_string(&crawl_result)
+                    .expect("Failed to serialize CrawlResult to JSON");
 
-                    match producer_clone.send(record, Duration::from_secs(0)).await {
-                        Ok(_) => {
-                            // Success
-                        },
-                        Err((e, _)) => {
-                            if e.to_string().contains("Message size too large") {
-                                eprintln!("⚠️ Too large: {}. Sending lite version.", payload);
-                                let mut lite = crawl_result.clone();
-                                lite.content = Some("<<CONTENT_TOO_LARGE>>".to_string());
-                                let lite_json = serde_json::to_string(&lite).unwrap();
-                                let _ = producer_clone.send(
-                                    FutureRecord::to(&produce_topic).key(&payload).payload(&lite_json),
-                                    Duration::from_secs(0)
-                                ).await;
-                            } else {
-                                eprintln!("Producer error for {}: {}", payload, e);
-                            }
+                // Create a record for the results topic
+                let record = FutureRecord::to(produce_topic)
+                    .key(&source_url)
+                    .payload(&result_json);
+
+                // Send the result to Kafka
+                match producer.send(record, Duration::from_secs(0)).await {
+                    Ok(_) => {
+                        println!("Successfully produced crawl result for {}", source_url);
+
+                        // ---- NEW PART: Manually commit the offset ----
+                        // We only commit AFTER we know the result was produced.
+                        if let Err(e) = consumer.commit_message(&m, rdkafka::consumer::CommitMode::Async) {
+                            eprintln!("Failed to commit offset: {}", e);
                         }
+                    },
+                    Err((e, _)) => {
+                        eprintln!("Failed to produce Kafka message for {}: {}", source_url, e);
+                        // We DO NOT commit here, so the message will be re-processed later.
                     }
-                });
+                }
             }
         }
     }

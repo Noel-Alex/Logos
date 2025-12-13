@@ -69,15 +69,30 @@ services:
       - -c
       - |
         echo 'Waiting for Redpanda Admin API...'
-        # FIX: Point to the admin host explicitly
         while ! rpk cluster health -X admin.hosts=redpanda:9644; do sleep 2; done
         
         echo 'Redpanda is up! Creating topics...'
-        # These commands talk to the Kafka port (9092), so we use 'brokers' here
-        rpk topic create urls-to-crawl -p 160 -r 1 -X brokers=redpanda:9092
-        rpk topic create crawl-results -p 16 -r 1 -c max.message.bytes=10485760 -X brokers=redpanda:9092
         
-        echo 'Topics created successfully.'
+        # TOPIC: urls-to-crawl
+        # -p 160: High concurrency
+        # retention.ms=3600000: Delete data older than 1 hour (safety buffer)
+        # retention.bytes=5368709120: Keep max 5GB of backlog total
+        # segment.bytes=16777216: Close a log file every 16MB so it can be deleted quickly
+        rpk topic create urls-to-crawl -p 160 -r 1 \
+          -c retention.ms=3600000 \
+          -c retention.bytes=5368709120 \
+          -c segment.bytes=16777216 \
+          -X brokers=redpanda:9092
+        
+        # TOPIC: crawl-results
+        # Same logic, but maybe we keep results slightly longer (e.g., 4 hours)
+        rpk topic create crawl-results -p 16 -r 1 \
+          -c retention.ms=14400000 \
+          -c max.message.bytes=10485760 \
+          -c segment.bytes=67108864 \
+          -X brokers=redpanda:9092
+        
+        echo 'Topics created with Aggressive Retention policies.'
     networks:
       - monitoring-net
 

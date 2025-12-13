@@ -12,14 +12,19 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
+
+  - job_name: 'redpanda'
+    static_configs:
+      - targets: ['redpanda:9644'] # Port 9644 is the admin API containing metrics
+    metrics_path: /metrics
+
+
   - job_name: 'loki'
     static_configs:
       - targets: ['loki:3100']
 
-  # --- THIS IS THE IMPORTANT CHANGE ---
-  # It now uses the Docker service name 'scylla' to find the database.
   - job_name: 'scylla'
     static_configs:
-      - targets: ['scylla:9180'] # Scylla metrics port
+      - targets: ['scylla:9180']
         labels:
           cluster: 'local-scylla-cluster'
