@@ -1,41 +1,65 @@
 // src/main.rs
+use rdkafka::config::ClientConfig;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use std::env;
+use std::time::Duration;
+use url::Url;
 
-// Declare the producer and consumer modules
-
-mod consumer;
-mod producer;
-
-// Use tokio for our async main function
 #[tokio::main]
 async fn main() {
-    // --- Configuration ---
-    let bootstrap_servers = "localhost:9093";
+    // 1. Load Environment Variables
+    dotenvy::dotenv().ok();
+    let bootstrap_servers = env::var("KAFKA_SERVER").unwrap_or_else(|_| "localhost:9093".to_string());
     let topic_name = "urls-to-crawl";
-    let group_id = "arachne-worker-group-1";
 
-    // A sample list of URLs to crawl
-    // Note the different domains, which will be used as partition keys
-    let urls_to_process = vec![
-        "https://www.rust-lang.org/",
-        "https://en.wikipedia.org/wiki/Rust_(programming_language)",
-        "https://github.com/rust-lang/rust",
-        "https://www.reddit.com/r/rust/",
-        "https://en.wikipedia.org/wiki/Concurrency",
-        "https://www.rust-lang.org/community",
+    println!("--- Arachne Seeder ---");
+    println!("Bootstrap Servers: {}", bootstrap_servers);
+    println!("Target Topic:      {}", topic_name);
+
+    // 2. Define Seed URLs
+    // Add any starting points you want here
+    let seed_urls = vec![
+        "https://www.wikipedia.org",
+        "https://www.google.com",
+        "https://www.bing.com",
+        "https://duckduckgo.com",
+        "https://yandex.com",
+        "https://baidu.com",
+        "https://archive.org",
     ];
 
-    println!("--- Arachne Kafka Demo ---");
+    // 3. Create the Producer
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap_servers)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .expect("Producer creation failed");
 
-    // --- Run the Producer ---
-    // In a real application, the producer (Coordinator) would run in a separate process.
-    producer::produce(bootstrap_servers, topic_name, &urls_to_process).await;
+    println!("\nSeeding {} URLs...", seed_urls.len());
 
-    println!("\n----------------------------------\n");
+    // 4. Send URLs
+    for url_str in seed_urls {
+        // Extract domain to use as the partition key.
+        // This ensures the seed URL goes to the same partition as future links discovered from it.
+        let key = match Url::parse(url_str) {
+            Ok(u) => u.domain().unwrap_or("unknown").to_string(),
+            Err(_) => "unknown".to_string(),
+        };
 
-    // --- Run the Consumer ---
-    // In a real application, the consumers (Workers) would be a separate, scalable fleet.
-    consumer::consume(bootstrap_servers, group_id, topic_name).await;
+        let record = FutureRecord::to(topic_name)
+            .payload(url_str)
+            .key(&key); // <-- Important for partitioning
 
-    println!("\n--- Demo Finished ---");
+        // Send asynchronously
+        match producer.send(record, Duration::from_secs(0)).await {
+            Ok((partition, offset)) => {
+                println!("✅ Sent: {:<50} (Part: {}, Off: {})", url_str, partition, offset);
+            }
+            Err((e, _msg)) => {
+                eprintln!("❌ Failed to send {}: {}", url_str, e);
+            }
+        }
+    }
+
+    println!("\n--- Seeding Complete ---");
 }
-

@@ -6,6 +6,9 @@ use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use std::env;
 use crate::{CrawlResult, CrawlStatus};
+use futures::{stream, StreamExt};
+use std::sync::{Arc, Mutex};
+use std::collections::HashSet;
 
 
 
@@ -50,27 +53,69 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
 }
 
 /// Inserts or updates a crawled page's data in the database.
-pub async fn add_crawled_page(session: &Session, page: &CrawlResult) -> Result<()> {
-    let insert_cql = "
-        INSERT INTO Arachne.crawled_pages
-        (source_url, content, http_status_code)
-        VALUES (?, ?, ?)";
+pub async fn add_crawled_pages_concurrently(
+    session: &Session,
+    pages: &[CrawlResult],
+    prepared: &PreparedStatement
+) -> Result<()> {
+    // We create a stream of futures
+    let bodies = stream::iter(pages)
+        .map(|page| {
+            let values = (
+                &page.source_url,
+                &page.content,
+                page.status.as_i32(),
+            );
+            session.execute_unpaged(prepared, values)
+        })
+        .buffer_unordered(100); // Execute 100 inserts in parallel
 
-    let prepared = session.prepare(insert_cql).await?;
+    // Await all results
+    bodies.for_each(|res| async {
+        if let Err(e) = res {
+            eprintln!("Error inserting page: {}", e);
+        }
+    }).await;
 
-    let values = (
-        &page.source_url,
-        &page.content,
-        page.status.as_i32(),
-    );
-
-    // Use the standard `execute` method
-    session.execute_unpaged(&prepared, values).await?;
-
-    println!("Successfully inserted data for URL: {}", page.source_url);
     Ok(())
 }
 
+pub async fn check_existing_urls(
+    session: &Session,
+    urls: Vec<String>,
+    prepared: &PreparedStatement
+) -> Result<HashSet<String>> {
+
+    let existing_urls = Arc::new(Mutex::new(HashSet::new()));
+
+    let checks = stream::iter(urls)
+        .map(|url| {
+            let existing_clone = existing_urls.clone();
+            async move {
+                // Execute the check
+                match session.execute_unpaged(prepared, (&url,)).await?.into_rows_result()? {
+                    Ok(result) => {
+                        // --- FIX IS HERE ---
+                        // Instead of accessing result.rows, we try to iterate over typed results.
+                        // We expect a single column of type String: (String,)
+                        if let Ok(mut iter) = result.rows::<(String,)>() {
+                            // If the iterator produces at least one item, the URL exists.
+                            if iter.next().is_some() {
+                                existing_clone.lock().unwrap().insert(url);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Error checking URL {}: {}", url, e),
+                }
+            }
+        })
+        .buffer_unordered(100); // Process 100 reads in parallel
+
+    checks.collect::<()>().await;
+
+    let result = Arc::try_unwrap(existing_urls).unwrap().into_inner().unwrap();
+    Ok(result)
+}
 /*
 #[tokio::main]
 async fn main() -> Result<()> {
