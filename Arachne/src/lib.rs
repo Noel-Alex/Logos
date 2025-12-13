@@ -6,8 +6,10 @@ use scylla::client::session_builder::SessionBuilder;
 use std::env;
 use chrono::{DateTime, Utc, NaiveDateTime};
 pub mod db;
+use wreq::{Client, ClientBuilder};
+use wreq_util::Emulation;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CrawlResult {
     pub source_url: String,
     pub status: CrawlStatus,
@@ -15,7 +17,7 @@ pub struct CrawlResult {
     pub discovered_urls: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum CrawlStatus {
     Success,
     HttpError(u16),
@@ -35,4 +37,10 @@ impl CrawlStatus {
             CrawlStatus::FetchError(_) => 0,
         }
     }
+}
+
+pub fn client(){
+    let http_client = Client::builder()
+        .emulation(Emulation::Chrome137)
+        .build().unwrap();
 }

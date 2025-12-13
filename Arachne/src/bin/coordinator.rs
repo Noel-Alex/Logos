@@ -31,6 +31,7 @@ async fn main() {
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
         .set("enable.auto.commit", "false") // IMPORTANT: Manual commits
+        .set("auto.offset.reset", "earliest")
         .create()
         .expect("Consumer creation failed");
 
@@ -61,6 +62,7 @@ async fn main() {
                     Ok(m) => {
                         // Attempt to deserialize
                         if let Some(Ok(payload)) = m.payload_view::<str>() {
+                            println!("Coordinator received payload: {:.50}...", payload);
                             match serde_json::from_str::<CrawlResult>(payload) {
                                 Ok(result) => {
                                     result_buffer.push(result);
@@ -110,6 +112,7 @@ async fn main() {
                     .unwrap_or_default();
 
                 // 4. Produce NEW URLs to Kafka
+                //println!("{:?}", urls_to_check);
                 for url in urls_to_check {
                     if !existing.contains(&url) {
                         // Extract Domain for Partition Key
@@ -119,6 +122,7 @@ async fn main() {
                             .unwrap_or_else(|| "unknown".to_string());
 
                         // Fire and forget (async send)
+                        //println!("{}", url);
                         let _ = producer.send(
                             FutureRecord::to(produce_topic).key(&key).payload(&url),
                             Duration::from_secs(0)

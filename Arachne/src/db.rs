@@ -58,7 +58,7 @@ pub async fn add_crawled_pages_concurrently(
     pages: &[CrawlResult],
     prepared: &PreparedStatement
 ) -> Result<()> {
-    // We create a stream of futures
+    // Note: We use stream::iter to execute parallel async requests
     let bodies = stream::iter(pages)
         .map(|page| {
             let values = (
@@ -68,9 +68,8 @@ pub async fn add_crawled_pages_concurrently(
             );
             session.execute_unpaged(prepared, values)
         })
-        .buffer_unordered(100); // Execute 100 inserts in parallel
+        .buffer_unordered(50); // Process 50 writes in parallel
 
-    // Await all results
     bodies.for_each(|res| async {
         if let Err(e) = res {
             eprintln!("Error inserting page: {}", e);
@@ -92,24 +91,38 @@ pub async fn check_existing_urls(
         .map(|url| {
             let existing_clone = existing_urls.clone();
             async move {
-                // Execute the check
-                match session.execute_unpaged(prepared, (&url,)).await?.into_rows_result()? {
-                    Ok(result) => {
-                        // --- FIX IS HERE ---
-                        // Instead of accessing result.rows, we try to iterate over typed results.
-                        // We expect a single column of type String: (String,)
-                        if let Ok(mut iter) = result.rows::<(String,)>() {
-                            // If the iterator produces at least one item, the URL exists.
-                            if iter.next().is_some() {
-                                existing_clone.lock().unwrap().insert(url);
+                // 1. Execute the query
+                // We DO NOT use '?' here because we are inside an async block
+                // and we want to handle errors locally without returning.
+                let execution_result = session.execute_unpaged(prepared, (&url,)).await;
+
+                match execution_result {
+                    Ok(query_result) => {
+                        // 2. Convert to QueryRowsResult (as per docs)
+                        match query_result.into_rows_result() {
+                            Ok(rows_result) => {
+                                // 3. Use convenience method maybe_first_row
+                                // We expect a single column (source_url) which is a String.
+                                // The type signature <(String,)> corresponds to that single column.
+                                match rows_result.maybe_first_row::<(String,)>() {
+                                    Ok(Some(_row)) => {
+                                        // Row found -> URL exists
+                                        existing_clone.lock().unwrap().insert(url);
+                                    }
+                                    Ok(None) => {
+                                        // No row found -> URL does not exist
+                                    }
+                                    Err(e) => eprintln!("Row parsing error for {}: {}", url, e),
+                                }
                             }
+                            Err(e) => eprintln!("Result conversion error for {}: {}", url, e),
                         }
                     }
-                    Err(e) => eprintln!("Error checking URL {}: {}", url, e),
+                    Err(e) => eprintln!("DB execution error for {}: {}", url, e),
                 }
             }
         })
-        .buffer_unordered(100); // Process 100 reads in parallel
+        .buffer_unordered(100); // Check 100 URLs in parallel
 
     checks.collect::<()>().await;
 

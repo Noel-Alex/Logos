@@ -2,14 +2,20 @@
 name = "arachne"
 version = "0.1.0"
 edition = "2024"
-default-run = "arachne"
+default-run = "seeder"
 
 [[bin]]
 name="stress-test-kafka"
 path = "src/kafka_stress_test.rs"
 
+[[bin]]
+name="seeder"
+path = "src/main.rs"
+
 [dependencies]
 reqwest = { version = "0.12.5", features = ["rustls-tls", "brotli"] } # Added brotli for better compression support
+wreq = { version = "*"}
+wreq-util = "*"
 scraper = "0.19.0"
 tokio = { version = "1.38.0", features = ["full"] }
 url = "2.5.2"

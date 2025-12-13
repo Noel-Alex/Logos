@@ -1,22 +1,22 @@
+version: '3.8'
+
 networks:
   monitoring-net:
     driver: bridge
 
 volumes:
-  kafka_data:
+  redpanda_data:
     driver: local
   scylla_data:
     driver: local
 
 services:
-  # --- APPLICATION STACK ---
+  # --- DATA STORE STACK ---
   scylla:
     image: scylladb/scylla:latest
     container_name: scylla
     ports:
-      - "9042:9042" # Native CQL port
-      # The 9180 port is for Prometheus metrics. We don't need to publish it to the host,
-      # as Prometheus will access it over the internal Docker network.
+      - "9042:9042" # Native CQL
     volumes:
       - scylla_data:/var/lib/scylla
     command:
@@ -32,46 +32,52 @@ services:
     networks:
       - monitoring-net
 
-  kafka:
-    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
-    container_name: kafka-broker
+  # --- STREAMING STACK (REDPANDA) ---
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda start
+      - --smp 1  # Use 1 CPU core
+      - --memory 2G # Explicit RAM limit
+      - --reserve-memory 0M
+      - --overprovisioned
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAIN://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      - --advertise-kafka-addr PLAIN://redpanda:9092,OUTSIDE://localhost:9093
+      - --pandaproxy-addr 0.0.0.0:8082
     ports:
-      - "9093:9093" # External listener
+      - "9092:9092"
+      - "9093:9093"
+      - "8081:8081" # Schema Registry
+      - "8082:8082" # HTTP Proxy
+      - "9644:9644" # Admin + PROMETHEUS METRICS
     volumes:
-      - kafka_data:/bitnami/kafka
-    environment:
-      - KAFKA_CFG_NODE_ID=1
-      - KAFKA_CFG_PROCESS_ROLES=broker,controller
-      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
-      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=1@kafka:9094
-      - KAFKA_CFG_LISTENERS=INTERNAL://:9092,EXTERNAL://:9093,CONTROLLER://:9094
-      - KAFKA_CFG_ADVERTISED_LISTENERS=INTERNAL://kafka:9092,EXTERNAL://localhost:9093
-      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
-      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=INTERNAL
-      - KAFKA_CLUSTER_ID=mR__5yE4SgGkI-gLmswYNA
-      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=false
-      - KAFKA_CFG_NUM_PARTITIONS=3
+      - redpanda_data:/var/lib/redpanda/data
     networks:
       - monitoring-net
 
-  init-kafka:
-    image: bitnamilegacy/kafka:4.0.0-debian-12-r10
-    container_name: init-kafka
+  # --- INIT JOB (FIXED SYNTAX) ---
+  redpanda-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda-init
     depends_on:
-      - kafka
-    command: |
-      /bin/sh -c "
-        echo 'Waiting for Kafka to be ready...'
-        until kafka-topics.sh --bootstrap-server kafka:9092 --list; do
-          echo 'Kafka not ready yet, sleeping for 2 seconds...'
-          sleep 2
-        done
+      - redpanda
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo 'Waiting for Redpanda Admin API...'
+        # FIX: Point to the admin host explicitly
+        while ! rpk cluster health -X admin.hosts=redpanda:9644; do sleep 2; done
         
-        echo 'Kafka is up! Creating topics...'
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic urls-to-crawl --partitions 160 --replication-factor 1
-        kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic crawl-results --partitions 16 --replication-factor 1
+        echo 'Redpanda is up! Creating topics...'
+        # These commands talk to the Kafka port (9092), so we use 'brokers' here
+        rpk topic create urls-to-crawl -p 160 -r 1 -X brokers=redpanda:9092
+        rpk topic create crawl-results -p 16 -r 1 -c max.message.bytes=10485760 -X brokers=redpanda:9092
+        
         echo 'Topics created successfully.'
-      "
     networks:
       - monitoring-net
 
@@ -81,35 +87,15 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      - init-kafka
+      - redpanda
     environment:
-      KAFKA_CLUSTERS_0_NAME: arachne-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
       DYNAMIC_CONFIG_ENABLED: 'true'
     networks:
       - monitoring-net
 
   # --- MONITORING STACK ---
-  jmx-exporter:
-    image: sscaling/jmx-prometheus-exporter
-    container_name: jmx-exporter
-    command: "5556" # Port the exporter will listen on
-    ports:
-      - "5556:5556"
-    environment:
-      # --- THIS IS THE CORRECTED SYNTAX ---
-      # Switched to mapping syntax and used a multi-line string for CONFIG_YML
-      JMX_PORT: 9997
-      JMX_HOST: kafka
-      CONFIG_YML: |
-        ---
-        - pattern: 'kafka.consumer<type=consumer-fetch-manager-metrics, client-id=(.+), topic=(.+), partition=(.+)><>records-lag'
-          name: "kafka_consumer_records_lag"
-          labels:
-            clientId: "$1"
-            topic: "$2"
-            partition: "$3"
-
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
@@ -122,8 +108,8 @@ services:
     networks:
       - monitoring-net
     depends_on:
-      - alertmanager
-      - scylla # Make sure Scylla is healthy before Prometheus starts scraping
+      - redpanda
+      - scylla
 
   alertmanager:
     image: prom/alertmanager:latest
