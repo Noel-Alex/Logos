@@ -12,12 +12,10 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-
   - job_name: 'redpanda'
     static_configs:
-      - targets: ['redpanda:9644'] # Port 9644 is the admin API containing metrics
-    metrics_path: /metrics
-
+      - targets: ['redpanda:9644']
+    metrics_path: /public_metrics
 
   - job_name: 'loki'
     static_configs:
@@ -28,3 +26,13 @@ scrape_configs:
       - targets: ['scylla:9180']
         labels:
           cluster: 'local-scylla-cluster'
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080'] # Internal Docker port (not 8085)
+
+remote_write:
+  - url: "http://victoriametrics:8428/api/v1/write"
+    queue_config:
+      max_samples_per_send: 10000
+      max_shards: 30

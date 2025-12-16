@@ -15,6 +15,23 @@ use tokio::sync::Mutex;
 use url::{ParseError, Url};
 use arachne::db;
 
+
+
+// On Linux/MacOS, use Jemalloc (Standard recommendation)
+#[cfg(not(target_os = "windows"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+//67
+// On Windows, use Mimalloc (Microsoft's high-performance allocator)
+#[cfg(target_os = "windows")]
+use mimalloc::MiMalloc;
+#[cfg(target_os = "windows")]
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 #[derive(Debug, thiserror::Error)]
 enum CrawlerError {
     #[error("Request error: {0}")]
@@ -106,7 +123,8 @@ async fn main() {
     // --- Create Kafka Producer ---
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
-        .set("queue.buffering.max.messages", "100000")
+        .set("queue.buffering.max.messages", "500")
+        .set("queue.buffering.max.kbytes", "512000")
         .set("linger.ms", "1000")
         .set("batch.size", "6553600")
         .set("compression.type", "lz4")
@@ -115,7 +133,10 @@ async fn main() {
         .expect("Producer creation failed");
 
     // --- Create a reusable reqwest client ---
-    let http_client = Client::new();
+    let http_client = Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()
+        .unwrap();
 
     println!("Worker started. Waiting for URLs...");
 

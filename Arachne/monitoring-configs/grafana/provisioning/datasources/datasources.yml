@@ -5,8 +5,18 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
-    isDefault: true
+    isDefault: false
+
   - name: Loki
     type: loki
     access: proxy
     url: http://loki:3100
+
+  - name: VictoriaMetrics
+    type: prometheus
+    access: proxy
+    url: http://victoriametrics:8428
+    uid: af7795dle8buoa
+    isDefault: true
+    jsonData:
+      timeInterval: "15s"

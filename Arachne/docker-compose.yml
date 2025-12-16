@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   monitoring-net:
     driver: bridge
@@ -8,6 +6,10 @@ volumes:
   redpanda_data:
     driver: local
   scylla_data:
+    driver: local
+  vm_data:
+    driver: local
+  grafana_data:
     driver: local
 
 services:
@@ -38,15 +40,20 @@ services:
     container_name: redpanda
     command:
       - redpanda start
-      - --smp 1  # Use 1 CPU core
+      - --smp 4  # Use 1 CPU core
       - --memory 2G # Explicit RAM limit
       - --reserve-memory 0M
       - --overprovisioned
       - --node-id 0
       - --check=false
-      - --kafka-addr PLAIN://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
       - --advertise-kafka-addr PLAIN://redpanda:9092,OUTSIDE://localhost:9093
       - --pandaproxy-addr 0.0.0.0:8082
+      - --kafka-addr PLAIN://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
+      - --rpc-addr 0.0.0.0:33145
+      # Increase max request size to 20MB globally
+      - --set redpanda.kafka_batch_max_bytes=209715200
+      - --set redpanda.kafka_max_message_bytes=209715200
+      #- --set max.poll.interval.ms=18000000
     ports:
       - "9092:9092"
       - "9093:9093"
@@ -73,49 +80,45 @@ services:
         
         echo 'Redpanda is up! Creating topics...'
         
-        # TOPIC: urls-to-crawl
-        # -p 160: High concurrency
-        # retention.ms=3600000: Delete data older than 1 hour (safety buffer)
-        # retention.bytes=5368709120: Keep max 5GB of backlog total
-        # segment.bytes=16777216: Close a log file every 16MB so it can be deleted quickly
+
         rpk topic create urls-to-crawl -p 160 -r 1 \
-          -c retention.ms=3600000 \
-          -c retention.bytes=5368709120 \
-          -c segment.bytes=16777216 \
+          -c retention.ms=604800000 \
+          -c segment.bytes=67108864 \
           -X brokers=redpanda:9092
         
         # TOPIC: crawl-results
-        # Same logic, but maybe we keep results slightly longer (e.g., 4 hours)
         rpk topic create crawl-results -p 16 -r 1 \
-          -c retention.ms=14400000 \
-          -c max.message.bytes=10485760 \
-          -c segment.bytes=67108864 \
+          -c max.message.bytes=209715200 \
+          -c retention.ms=604800000 \
           -X brokers=redpanda:9092
         
         echo 'Topics created with Aggressive Retention policies.'
     networks:
       - monitoring-net
 
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - "8080:8080"
-    depends_on:
-      - redpanda
-    environment:
-      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
-      DYNAMIC_CONFIG_ENABLED: 'true'
-    networks:
-      - monitoring-net
+#  kafka-ui:
+#    image: provectuslabs/kafka-ui:latest
+#    container_name: kafka-ui
+#    ports:
+#      - "8080:8080"
+#    depends_on:
+#      - redpanda
+#    environment:
+#      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
+#      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
+#      DYNAMIC_CONFIG_ENABLED: 'true'
+#    networks:
+#      - monitoring-net
 
   # --- MONITORING STACK ---
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
+    # Reduce local Prometheus retention to 2 days to save space,
+    # since long-term data goes to VictoriaMetrics.
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=2d'
     ports:
       - 9090:9090
     volumes:
@@ -125,6 +128,20 @@ services:
     depends_on:
       - redpanda
       - scylla
+      - victoriametrics # Ensure VM is up before Prometheus tries to write to it
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:latest
+    container_name: victoriametrics
+    ports:
+      - "8428:8428"
+    volumes:
+      - vm_data:/victoria-metrics-data
+    command:
+      - "-retentionPeriod=1y" # Keep data for 1 year (adjust as needed: 6m, 2y, etc.)
+      - "-storageDataPath=/victoria-metrics-data"
+    networks:
+      - monitoring-net
 
   alertmanager:
     image: prom/alertmanager:latest
@@ -168,9 +185,10 @@ services:
       - 3000:3000
     volumes:
       - ./monitoring-configs/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=scylladb-scylla-datasource
     networks:
@@ -178,3 +196,36 @@ services:
     depends_on:
       - prometheus
       - loki
+
+  cadvisor:
+      image: gcr.io/cadvisor/cadvisor:v0.47.2     # Use a pinned version for stability
+      container_name: cadvisor
+      restart: unless-stopped
+      privileged: true                             # Required to access host metrics
+      devices:
+        - /dev/kmsg
+      volumes:
+        - /:/rootfs:ro                             # Read host filesystem
+        - /var/run:/var/run:ro                     # Read Docker socket
+        - /sys:/sys:ro                             # Read Linux Kernel stats
+        - /var/lib/docker/:/var/lib/docker:ro      # Read Docker container storage
+        - /dev/disk/:/dev/disk:ro
+      ports:
+        - "8085:8080"                              # Expose on host port 8081 (8080 is taken by Kafka-UI)
+      networks:
+        - monitoring-net
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok_tunnel
+    restart: unless-stopped
+    environment:
+      # Paste your real token below
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: "http grafana:3000" # Points to the grafana container name and port
+    ports:
+      - 4040:4040 # Local status dashboard for ngrok
+    networks:
+      - monitoring-net
+    depends_on:
+      - grafana
