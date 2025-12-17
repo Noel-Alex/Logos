@@ -3,3 +3,5 @@
 /.idea
 .env
 Arachne/.env
+*.exe
+Arachne/*.exe

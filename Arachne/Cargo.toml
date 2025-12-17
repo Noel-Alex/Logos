@@ -13,7 +13,7 @@ name="seeder"
 path = "src/main.rs"
 
 [dependencies]
-reqwest = { version = "0.12.5", features = ["rustls-tls", "brotli"] } # Added brotli for better compression support
+reqwest = { version = "0.12.5", features = ["rustls-tls", "brotli", "stream"] } # Added brotli for better compression support
 wreq = { version = "*"}
 wreq-util = "*"
 scraper = "0.19.0"
@@ -38,3 +38,5 @@ rand = "0.9.2"
 tikv-jemallocator = "*"
 [target.'cfg(target_os = "windows")'.dependencies]
 mimalloc = "*"
+futures-util = "0.3"
+bytes = "1.5"

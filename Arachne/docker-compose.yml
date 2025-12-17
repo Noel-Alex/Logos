@@ -22,15 +22,34 @@ services:
     volumes:
       - scylla_data:/var/lib/scylla
     command:
-      - --smp=1
+      - --smp=16
       - --developer-mode=1
-      - --memory=4G
+      - --memory=16G
+      - --cluster-name=arachne-cluster
     healthcheck:
       test: ["CMD-SHELL", "nodetool status | grep '^UN'"]
       interval: 15s
       timeout: 10s
       retries: 10
     restart: unless-stopped
+    networks:
+      - monitoring-net
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.rootfs=/rootfs'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    ports:
+      - "9100:9100"
     networks:
       - monitoring-net
 
@@ -96,19 +115,19 @@ services:
     networks:
       - monitoring-net
 
-#  kafka-ui:
-#    image: provectuslabs/kafka-ui:latest
-#    container_name: kafka-ui
-#    ports:
-#      - "8080:8080"
-#    depends_on:
-#      - redpanda
-#    environment:
-#      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
-#      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
-#      DYNAMIC_CONFIG_ENABLED: 'true'
-#    networks:
-#      - monitoring-net
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8080:8080"
+    depends_on:
+      - redpanda
+    environment:
+      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
+      DYNAMIC_CONFIG_ENABLED: 'true'
+    networks:
+      - monitoring-net
 
   # --- MONITORING STACK ---
   prometheus:

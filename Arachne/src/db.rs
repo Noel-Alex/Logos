@@ -1,5 +1,5 @@
 //db.rs
-use anyhow::Result;
+/*use anyhow::Result;
 use scylla::statement::batch::Batch;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::client::session::Session;
@@ -9,6 +9,7 @@ use crate::{CrawlResult, CrawlStatus};
 use futures::{stream, StreamExt};
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
+use futures::{TryFutureExt}; // Ensure you have 'futures' in Cargo.toml
 
 
 
@@ -129,7 +130,7 @@ pub async fn check_existing_urls(
     let result = Arc::try_unwrap(existing_urls).unwrap().into_inner().unwrap();
     Ok(result)
 }
-/*
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let session = connect_to_db().await?;
@@ -163,3 +164,136 @@ async fn main() -> Result<()> {
     Ok(())
 }
 */
+
+use anyhow::Result;
+use scylla::statement::prepared::PreparedStatement;
+use scylla::client::session::Session;
+use scylla::client::session_builder::SessionBuilder;
+use std::env;
+use crate::{CrawlResult};
+use futures::{stream, StreamExt};
+use std::collections::HashSet;
+
+/// Establishes a connection to the database and returns a Session.
+pub async fn connect_to_db() -> Result<Session> {
+    let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+    println!("Connecting to ScyllaDB at {}...", uri);
+
+    // Increase connection pool size for high parallelism if needed,
+    // but default is usually fine for this scale.
+    let session = SessionBuilder::new()
+        .known_node(uri)
+        .build()
+        .await?;
+
+    println!("Connection successful.");
+
+    setup_schema(&session).await.unwrap();
+    Ok(session)
+}
+
+/// Sets up the necessary keyspace and table in the database.
+pub async fn setup_schema(session: &Session) -> Result<()> {
+    // println!("Checking database schema...");
+
+    let keyspace_cql = "
+        CREATE KEYSPACE IF NOT EXISTS Arachne
+        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
+
+    let table_cql = "
+        CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
+            source_url TEXT PRIMARY KEY,
+            content TEXT,
+            http_status_code INT
+        )";
+
+    session.query_unpaged(keyspace_cql, &[]).await?;
+    session.query_unpaged(table_cql, &[]).await?;
+
+    Ok(())
+}
+
+/// Inserts crawled pages concurrently.
+/// Optimized for high throughput using Scylla's shard-awareness.
+pub async fn add_crawled_pages_concurrently(
+    session: &Session,
+    pages: Vec<CrawlResult>, // Takes ownership
+    prepared: &PreparedStatement
+) -> Result<()> {
+    const CONCURRENCY_LIMIT: usize = 256;
+
+    let bodies = stream::iter(pages)
+        .map(|page| {
+            // FIX: Remove the '&'.
+            // We MOVE ownership of the strings into the tuple.
+            // The 'execute_unpaged' future will capture this tuple (and the strings inside),
+            // keeping the data alive as long as the future needs it.
+            let values = (
+                page.source_url,
+                page.content,
+                page.status.as_i32(),
+            );
+            session.execute_unpaged(prepared, values)
+        })
+        .buffer_unordered(CONCURRENCY_LIMIT);
+
+    bodies.for_each(|res| async {
+        if let Err(e) = res {
+            eprintln!("DB Insert Error: {}", e);
+        }
+    }).await;
+
+    Ok(())
+}
+
+
+/// Checks which URLs already exist in the DB.
+/// Optimization: Removed Arc<Mutex> in favor of Stream filter_map.
+pub async fn check_existing_urls(
+    session: &Session,
+    urls: Vec<String>,
+    prepared: &PreparedStatement
+) -> Result<HashSet<String>> {
+    const CONCURRENCY_LIMIT: usize = 256;
+
+    // Create a stream of futures
+    let results = stream::iter(urls)
+        .map(|url| async move {
+            // Execute query
+            let execution_result = session.execute_unpaged(prepared, (&url,)).await;
+
+            match execution_result {
+                Ok(query_result) => {
+                    // Check if rows exist
+                    match query_result.into_rows_result() {
+                        Ok(rows) => {
+                            // If we get a row back, the URL exists. Return Some(url).
+                            // If None, it doesn't exist.
+                            match rows.maybe_first_row::<(String,)>() {
+                                Ok(Some(_)) => Some(url),
+                                Ok(None) => None,
+                                Err(e) => {
+                                    eprintln!("Row parse error for {}: {}", url, e);
+                                    None
+                                }
+                            }
+                        },
+                        Err(_) => None,
+                    }
+                },
+                Err(e) => {
+                    eprintln!("DB Check Error for {}: {}", url, e);
+                    None
+                }
+            }
+        })
+        // Run checks in parallel
+        .buffer_unordered(CONCURRENCY_LIMIT)
+        // Filter out None values (non-existing URLs), keeping only existing ones
+        .filter_map(|res| async { res })
+        // Collect into HashSet
+        .collect::<HashSet<String>>()
+        .await;
+
+    Ok(results)
+}
