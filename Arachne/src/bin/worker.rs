@@ -101,7 +101,7 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
 }
 
 
-// The main loop receiving Kafka messages and sending results remains identical.
+
 
 #[tokio::main]
 async fn main() {

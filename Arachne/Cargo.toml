@@ -13,7 +13,7 @@ name="seeder"
 path = "src/main.rs"
 
 [dependencies]
-reqwest = { version = "0.12.5", features = ["json", "gzip", "brotli", "deflate", "stream", "cookies", "native-tls"] } # Added brotli for better compression support
+reqwest = { version = "0.12.5", features = ["json", "gzip", "brotli", "deflate", "stream", "cookies", "native-tls", "hickory-dns"] } # Added brotli for better compression support
 wreq = { version = "*"}
 wreq-util = "*"
 scraper = "0.19.0"

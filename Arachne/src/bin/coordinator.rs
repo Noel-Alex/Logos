@@ -20,7 +20,6 @@ struct WorkItem {
     result: CrawlResult,
 }
 
-/// Helper to extract "example.com" from "https://example.com/foo"
 fn get_domain(url_str: &str) -> Option<String> {
     Url::parse(url_str)
         .ok()
@@ -32,12 +31,12 @@ async fn main() {
     dotenvy::dotenv().ok();
     println!("Coordinator initializing...");
 
-    // 1. Setup Database Repository
-    // The repo handles all connections and prepared statements internally.
+    // 1. Setup DB
     let db_repo = Arc::new(db::ArachneRepo::new().await.expect("DB Initialization failed"));
 
-    // 2. Setup Kafka (Producer & Consumer)
+    // 2. Setup Kafka
     let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER missing");
+    println!("Kafka Bootstrap: {}", bootstrap_servers);
 
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
@@ -48,44 +47,64 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::channel::<WorkItem>(10_000);
 
-    // Kafka Consumer Task
+    // --- CONSUMER TASK ---
     let bs_clone = bootstrap_servers.clone();
     tokio::spawn(async move {
         let consumer: StreamConsumer = ClientConfig::new()
             .set("bootstrap.servers", &bs_clone)
             .set("group.id", "arachne-coordinator")
             .set("enable.auto.commit", "true")
-            .set("auto.offset.reset", "earliest")
+            .set("auto.offset.reset", "earliest") // Ensure we read from start if new
             .create()
             .expect("Consumer failed");
+
         consumer.subscribe(&["crawl-results"]).unwrap();
-        println!("Coordinator listening on Kafka...");
+        println!("Consumer subscribed to 'crawl-results'. Waiting for messages...");
 
         loop {
-            if let Ok(m) = consumer.recv().await {
-                if let Some(Ok(payload)) = m.payload_view::<str>() {
-                    if let Ok(result) = serde_json::from_str::<CrawlResult>(payload) {
-                        let _ = tx.send(WorkItem { result }).await;
+            match consumer.recv().await {
+                Ok(m) => {
+                    // DEBUG LOGGING
+                    match m.payload_view::<str>() {
+                        Some(Ok(payload)) => {
+                            // print!(">"); // minimal heartbeat
+                            match serde_json::from_str::<CrawlResult>(payload) {
+                                Ok(result) => {
+                                    if let Err(_) = tx.send(WorkItem { result }).await {
+                                        eprintln!("Channel closed!");
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("\n[ERROR] JSON Deserialize Failed: {}", e);
+                                    // println!("Bad Payload snippet: {:.50}...", payload);
+                                }
+                            }
+                        }
+                        Some(Err(e)) => eprintln!("\n[ERROR] Payload is not UTF-8: {}", e),
+                        None => eprintln!("\n[WARN] Received empty payload"),
                     }
                 }
+                Err(e) => eprintln!("\n[ERROR] Kafka Recv Error: {}", e),
             }
         }
     });
 
-    // 3. Processing Loop
+    // --- PROCESSING LOOP ---
     let mut buffer: Vec<WorkItem> = Vec::with_capacity(BATCH_SIZE);
     let mut last_flush = Instant::now();
-    let semaphore = Arc::new(Semaphore::new(20)); // Max concurrent DB batches
+    let semaphore = Arc::new(Semaphore::new(20));
 
-    println!("Coordinator Loop Started.");
+    println!("Processor Loop Started.");
 
     loop {
-        // A. Fill Buffer
+        // A. Fill Buffer (with timeout)
         let fill_buffer = async {
             while buffer.len() < BATCH_SIZE {
                 match time::timeout(Duration::from_millis(50), rx.recv()).await {
-                    Ok(Some(item)) => buffer.push(item),
-                    _ => break,
+                    Ok(Some(item)) => buffer.push(item), // Got item
+                    Ok(None) => return, // Channel closed
+                    Err(_) => break, // Timeout hit (50ms elapsed, stop waiting and check flush)
                 }
             }
         };
@@ -95,28 +114,27 @@ async fn main() {
             && (buffer.len() >= BATCH_SIZE || last_flush.elapsed() > BATCH_TIMEOUT);
 
         if should_flush {
+            // DEBUG LOG
+            println!("\n[BATCH] Flushing {} items...", buffer.len());
+
             let permit = semaphore.clone().acquire_owned().await.unwrap();
             let batch: Vec<WorkItem> = std::mem::replace(&mut buffer, Vec::with_capacity(BATCH_SIZE));
 
-            // Clone Arcs for async task
             let db_repo = db_repo.clone();
             let producer = producer.clone();
 
             tokio::spawn(async move {
-                let _permit = permit;
+                let _permit = permit; // Hold semaphore
 
-                // 1. Group by Domain & Filter Links
+                // 1. Logic
                 let mut pages_by_domain: HashMap<String, Vec<CrawlResult>> = HashMap::new();
                 let mut domains_to_check = HashSet::new();
 
                 for item in batch {
                     if let Some(source_domain) = get_domain(&item.result.source_url) {
-                        // Strict Filtering: Only keep links from same domain
                         let internal_links: Vec<String> = item.result.discovered_urls
                             .into_iter()
-                            .filter(|link| {
-                                get_domain(link).map_or(false, |d| d == source_domain)
-                            })
+                            .filter(|link| get_domain(link).map_or(false, |d| d == source_domain))
                             .collect();
 
                         let filtered_result = CrawlResult {
@@ -129,12 +147,12 @@ async fn main() {
                     }
                 }
 
-                // 2. CALL DB: Check Counts
+                // 2. DB Check
+                // println!("Checking counts for {} domains...", domains_to_check.len());
                 let current_counts = db_repo.get_domain_counts(domains_to_check.into_iter().collect())
                     .await
                     .unwrap_or_default();
 
-                // 3. Prepare Logic
                 let mut pages_to_insert = Vec::new();
                 let mut increments: HashMap<String, i64> = HashMap::new();
                 let mut candidate_new_urls: HashSet<(String, String)> = HashSet::new();
@@ -152,37 +170,44 @@ async fn main() {
                             accepted_count += 1;
                         }
                     }
-
                     if accepted_count > 0 {
                         increments.insert(domain, accepted_count);
                     }
                 }
 
-                // 4. CALL DB: Insert Pages
+                // 3. DB Writes
                 if !pages_to_insert.is_empty() {
-                    let _ = db_repo.insert_pages(pages_to_insert).await;
+                    println!("Inserting {} pages...", pages_to_insert.len());
+                    if let Err(e) = db_repo.insert_pages(pages_to_insert).await {
+                         eprintln!("[ERROR] Insert Pages Failed: {}", e);
+                    }
                 }
 
-                // 5. CALL DB: Increment Counts
                 if !increments.is_empty() {
-                    let _ = db_repo.increment_domain_counts(increments).await;
+                    if let Err(e) = db_repo.increment_domain_counts(increments).await {
+                         eprintln!("[ERROR] Increment Counts Failed: {}", e);
+                    }
                 }
 
-                // 6. CALL DB & Kafka: Queue New URLs
+                // 4. Queue URLs
                 if !candidate_new_urls.is_empty() {
                     let candidates_vec: Vec<(String, String)> = candidate_new_urls.into_iter().collect();
-
                     let existing = db_repo.check_existing_urls(candidates_vec.clone())
                         .await
                         .unwrap_or_default();
 
+                    let mut queued_count = 0;
                     for (domain, url) in candidates_vec {
                         if !existing.contains(&url) {
                             let _ = producer.send(
-                                FutureRecord::to("urls-to-crawl").key(&domain).payload(&url),
+                                FutureRecord::to("urls-to-crawl").key(&url).payload(&url),
                                 Duration::from_secs(0),
                             ).await;
+                            queued_count += 1;
                         }
+                    }
+                    if queued_count > 0 {
+                        println!("Queued {} new URLs to Kafka.", queued_count);
                     }
                 }
             });
