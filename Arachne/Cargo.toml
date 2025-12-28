@@ -13,7 +13,7 @@ name="seeder"
 path = "src/main.rs"
 
 [dependencies]
-reqwest = { version = "0.12.5", features = ["rustls-tls", "brotli", "stream"] } # Added brotli for better compression support
+reqwest = { version = "0.12.5", features = ["json", "gzip", "brotli", "deflate", "stream", "cookies", "native-tls"] } # Added brotli for better compression support
 wreq = { version = "*"}
 wreq-util = "*"
 scraper = "0.19.0"
@@ -27,7 +27,7 @@ serde_json = "1.0" # For JSON format
 sha2 = "0.10.8" # To create unique filenames from URLs
 hex = "0.4.3" # To format the hash for filenames
 openssl = { version = "*", features = ["vendored"] }
-rdkafka = { version = "*", features = ["cmake-build"] }
+rdkafka = { version = "*", features = ["cmake-build", "zstd"] }
 chrono = "0.4.41"
 dotenvy = "0.15.7"
 robotparser = "0.11"
@@ -37,6 +37,14 @@ rand = "0.9.2"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 tikv-jemallocator = "*"
 [target.'cfg(target_os = "windows")'.dependencies]
-mimalloc = "*"
+mimalloc = { version = "*", default-features = false  }
 futures-util = "0.3"
 bytes = "1.5"
+
+# Parquet & Arrow (The gold standard for efficiency)
+parquet = { version = "54.0", features = ["async", "snap"] }
+arrow = "54.0"
+arrow-array = "54.0"
+arrow-schema = "54.0"
+ego-tree = "*"
+chrono = "0.4.39"

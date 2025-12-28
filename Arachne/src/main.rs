@@ -6,10 +6,12 @@ use std::time::Duration;
 use url::Url;
 
 #[tokio::main]
+
 async fn main() {
     // 1. Load Environment Variables
     dotenvy::dotenv().ok();
-    let bootstrap_servers = env::var("KAFKA_SERVER").unwrap_or_else(|_| "localhost:9093".to_string());
+    let bootstrap_servers =
+        env::var("KAFKA_SERVER").unwrap_or_else(|_| "localhost:9093".to_string());
     let topic_name = "urls-to-crawl";
 
     println!("--- Arachne Seeder ---");
@@ -37,29 +39,17 @@ async fn main() {
 
     println!("\nSeeding {} URLs...", seed_urls.len());
 
-    // 4. Send URLs
     for url_str in seed_urls {
-        // Extract domain to use as the partition key.
-        // This ensures the seed URL goes to the same partition as future links discovered from it.
         let key = match Url::parse(url_str) {
             Ok(u) => u.domain().unwrap_or("unknown").to_string(),
             Err(_) => "unknown".to_string(),
         };
 
-        let record = FutureRecord::to(topic_name)
-            .payload(url_str)
-            .key(&key); // <-- Important for partitioning
+        let record = FutureRecord::to(topic_name).payload(url_str).key(&key);
 
-        // Send asynchronously
-        match producer.send(record, Duration::from_secs(0)).await {
-            Ok((partition, offset)) => {
-                println!("✅ Sent: {:<50} (Part: {}, Off: {})", url_str, partition, offset);
-            }
-            Err((e, _msg)) => {
-                eprintln!("❌ Failed to send {}: {}", url_str, e);
-            }
-        }
+        // --- CODE FIXED BELOW ---
+        producer.send(record, Duration::from_secs(0)).await.unwrap();
+
+        println!("\n--- Seeding Complete ---");
     }
-
-    println!("\n--- Seeding Complete ---");
 }

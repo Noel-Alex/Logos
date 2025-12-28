@@ -2292,7 +2292,7 @@
         ]
     },
     "timezone": "utc",
-    "title": "OS Metrics",
+    "title": "Scylla OS Metrics",
     "uid": "OS-6-0",
     "version": 5
 }

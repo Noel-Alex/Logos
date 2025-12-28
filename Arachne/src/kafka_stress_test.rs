@@ -180,8 +180,8 @@ use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time;
 
@@ -276,7 +276,7 @@ async fn run_producer(id: usize, stats: Arc<Stats>) {
         // Batch size: try to reach 32KB before sending
         .set("batch.size", "32768")
         // Compression: trades a little CPU for MUCH higher network throughput
-//        .set("compression.type", "lz4")
+        //        .set("compression.type", "lz4")
         // Acks=1: Leader only. Fastest 'safe' setting.
         // Use 'acks=0' for absolute max speed (YOLO mode, potential data loss).
         .set("acks", "1")
@@ -286,7 +286,10 @@ async fn run_producer(id: usize, stats: Arc<Stats>) {
     // Pre-generate a payload to avoid allocation in the hot loop
     let payload = "a".repeat(MESSAGE_SIZE);
     // A rotating set of keys to simulate different domains and spread load across partitions
-    let keys = ["domain_a", "domain_b", "domain_c", "domain_d", "domain_e", "domain_f", "domain_g", "domain_h"];
+    let keys = [
+        "domain_a", "domain_b", "domain_c", "domain_d", "domain_e", "domain_f", "domain_g",
+        "domain_h",
+    ];
 
     let mut counter = 0;
     loop {

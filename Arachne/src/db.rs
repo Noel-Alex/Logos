@@ -1,299 +1,164 @@
-//db.rs
-/*use anyhow::Result;
-use scylla::statement::batch::Batch;
-use scylla::statement::prepared::PreparedStatement;
-use scylla::client::session::Session;
-use scylla::client::session_builder::SessionBuilder;
-use std::env;
-use crate::{CrawlResult, CrawlStatus};
-use futures::{stream, StreamExt};
-use std::sync::{Arc, Mutex};
-use std::collections::HashSet;
-use futures::{TryFutureExt}; // Ensure you have 'futures' in Cargo.toml
-
-
-
-/// Establishes a connection to the database and returns a Session.
-pub async fn connect_to_db() -> Result<Session> {
-    let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    println!("Connecting to ScyllaDB at {}...", uri);
-
-    let session = SessionBuilder::new().known_node(uri).build().await?;
-
-    println!("Connection successful.");
-
-    setup_schema(&session).await.unwrap();
-    Ok(session)
-}
-
-/// Sets up the necessary keyspace and table in the database.
-pub async fn setup_schema(session: &Session) -> Result<()> {
-    println!("Setting up database schema...");
-
-    let keyspace_cql = "
-        CREATE KEYSPACE IF NOT EXISTS Arachne
-        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
-
-    let table_cql = "
-        CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
-            source_url TEXT PRIMARY KEY,
-            content TEXT,
-            http_status_code INT
-        )";
-
-    // Use the standard `query` method
-    session.query_unpaged(keyspace_cql, &[]).await?;
-    println!("Keyspace 'Arachne' is ready.");
-
-    // Use the standard `query` method
-    session.query_unpaged(table_cql, &[]).await?;
-    println!("Table 'crawled_pages' is ready.");
-
-    println!("Schema setup complete.");
-    Ok(())
-}
-
-/// Inserts or updates a crawled page's data in the database.
-pub async fn add_crawled_pages_concurrently(
-    session: &Session,
-    pages: &[CrawlResult],
-    prepared: &PreparedStatement
-) -> Result<()> {
-    // Note: We use stream::iter to execute parallel async requests
-    let bodies = stream::iter(pages)
-        .map(|page| {
-            let values = (
-                &page.source_url,
-                &page.content,
-                page.status.as_i32(),
-            );
-            session.execute_unpaged(prepared, values)
-        })
-        .buffer_unordered(50); // Process 50 writes in parallel
-
-    bodies.for_each(|res| async {
-        if let Err(e) = res {
-            eprintln!("Error inserting page: {}", e);
-        }
-    }).await;
-
-    Ok(())
-}
-
-pub async fn check_existing_urls(
-    session: &Session,
-    urls: Vec<String>,
-    prepared: &PreparedStatement
-) -> Result<HashSet<String>> {
-
-    let existing_urls = Arc::new(Mutex::new(HashSet::new()));
-
-    let checks = stream::iter(urls)
-        .map(|url| {
-            let existing_clone = existing_urls.clone();
-            async move {
-                // 1. Execute the query
-                // We DO NOT use '?' here because we are inside an async block
-                // and we want to handle errors locally without returning.
-                let execution_result = session.execute_unpaged(prepared, (&url,)).await;
-
-                match execution_result {
-                    Ok(query_result) => {
-                        // 2. Convert to QueryRowsResult (as per docs)
-                        match query_result.into_rows_result() {
-                            Ok(rows_result) => {
-                                // 3. Use convenience method maybe_first_row
-                                // We expect a single column (source_url) which is a String.
-                                // The type signature <(String,)> corresponds to that single column.
-                                match rows_result.maybe_first_row::<(String,)>() {
-                                    Ok(Some(_row)) => {
-                                        // Row found -> URL exists
-                                        existing_clone.lock().unwrap().insert(url);
-                                    }
-                                    Ok(None) => {
-                                        // No row found -> URL does not exist
-                                    }
-                                    Err(e) => eprintln!("Row parsing error for {}: {}", url, e),
-                                }
-                            }
-                            Err(e) => eprintln!("Result conversion error for {}: {}", url, e),
-                        }
-                    }
-                    Err(e) => eprintln!("DB execution error for {}: {}", url, e),
-                }
-            }
-        })
-        .buffer_unordered(100); // Check 100 URLs in parallel
-
-    checks.collect::<()>().await;
-
-    let result = Arc::try_unwrap(existing_urls).unwrap().into_inner().unwrap();
-    Ok(result)
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let session = connect_to_db().await?;
-
-    // --- DEMONSTRATION ---
-    let page1 = CrawledPage {
-        source_url: "https://example.com/".to_string(),
-        content: "<html><body><h1>Welcome!</h1></body></html>".to_string(),
-        content_type: "text/html".to_string(),
-        http_status_code: 200,
-    };
-    add_crawled_page(&session, &page1).await?;
-
-    let page2 = CrawledPage {
-        source_url: "https://example.com/non-existent".to_string(),
-        content: "".to_string(),
-        content_type: "text/plain".to_string(),
-        http_status_code: 404,
-    };
-    add_crawled_page(&session, &page2).await?;
-
-    let page3 = CrawledPage {
-        source_url: "https://example.com/large-image.jpg".to_string(),
-        content: "s3://my-crawl-bucket/images/large-image.jpg".to_string(),
-        content_type: "s3_link/jpeg".to_string(),
-        http_status_code: 200,
-    };
-    add_crawled_page(&session, &page3).await?;
-
-    println!("\nScript finished successfully.");
-    Ok(())
-}
-*/
-
+// src/db.rs
+use crate::CrawlResult;
 use anyhow::Result;
-use scylla::statement::prepared::PreparedStatement;
+use futures::{StreamExt, stream};
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::statement::prepared::PreparedStatement;
+use std::collections::{HashMap, HashSet};
 use std::env;
-use crate::{CrawlResult};
-use futures::{stream, StreamExt};
-use std::collections::HashSet;
 
-/// Establishes a connection to the database and returns a Session.
-pub async fn connect_to_db() -> Result<Session> {
-    let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
-    println!("Connecting to ScyllaDB at {}...", uri);
-
-    // Increase connection pool size for high parallelism if needed,
-    // but default is usually fine for this scale.
-    let session = SessionBuilder::new()
-        .known_node(uri)
-        .build()
-        .await?;
-
-    println!("Connection successful.");
-
-    setup_schema(&session).await.unwrap();
-    Ok(session)
+pub struct ArachneRepo {
+    session: Session,
+    insert_stmt: PreparedStatement,
+    // update_count_stmt: Removed (We will use a raw query to bypass type strictness)
+    get_count_stmt: PreparedStatement,
+    check_exist_stmt: PreparedStatement,
 }
 
-/// Sets up the necessary keyspace and table in the database.
-pub async fn setup_schema(session: &Session) -> Result<()> {
-    // println!("Checking database schema...");
+impl ArachneRepo {
+    pub async fn new() -> Result<Self> {
+        let uri = env::var("SCYLLA_URI").unwrap_or_else(|_| "127.0.0.1:9042".to_string());
+        println!("Connecting to ScyllaDB at {}...", uri);
 
-    let keyspace_cql = "
-        CREATE KEYSPACE IF NOT EXISTS Arachne
-        WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
+        let session = SessionBuilder::new().known_node(uri).build().await?;
 
-    let table_cql = "
+        setup_schema(&session).await?;
+
+        println!("Preparing statements...");
+
+        let insert_stmt = session.prepare(
+            "INSERT INTO Arachne.crawled_pages (domain, url, tag_sequence, http_status, crawled_at) VALUES (?, ?, ?, ?, ?)"
+        ).await?;
+
+        // We skip preparing the Counter Update statement.
+        // Prepared statements enforce strict types (expecting a Counter object).
+        // Simple queries allow us to pass an i64 as a BigInt, which works for increments.
+
+        let get_count_stmt = session.prepare(
+            "SELECT page_count FROM Arachne.domain_stats WHERE domain = ?"
+        ).await?;
+
+        let check_exist_stmt = session.prepare(
+            "SELECT url FROM Arachne.crawled_pages WHERE domain = ? AND url = ?"
+        ).await?;
+
+        Ok(Self {
+            session,
+            insert_stmt,
+            get_count_stmt,
+            check_exist_stmt,
+        })
+    }
+
+    pub async fn get_domain_counts(&self, domains: Vec<String>) -> Result<HashMap<String, i64>> {
+        const CONCURRENCY_LIMIT: usize = 64;
+        let results = stream::iter(domains)
+            .map(|domain| async move {
+                let result = self.session.execute_unpaged(&self.get_count_stmt, (domain.clone(),)).await;
+                match result {
+                    Ok(res) => {
+                        // Safe unpacking of the result
+                        match res.into_rows_result() {
+                            Ok(rows) => match rows.maybe_first_row::<(i64,)>() {
+                                Ok(Some((count,))) => Some((domain, count)),
+                                _ => Some((domain, 0)),
+                            },
+                            Err(_) => Some((domain, 0)),
+                        }
+                    },
+                    Err(_) => None,
+                }
+            })
+            .buffer_unordered(CONCURRENCY_LIMIT)
+            .filter_map(|res| async { res })
+            .collect::<HashMap<String, i64>>()
+            .await;
+        Ok(results)
+    }
+
+    pub async fn insert_pages(&self, pages: Vec<(String, CrawlResult)>) -> Result<()> {
+        const CONCURRENCY_LIMIT: usize = 256;
+        stream::iter(pages)
+            .map(|(domain, page)| {
+                let values = (
+                    domain,
+                    page.source_url,
+                    page.content.unwrap_or_default(),
+                    page.status.as_i32(),
+                    // Ensure this table was dropped/recreated as BIGINT
+                    chrono::Utc::now().timestamp_millis(),
+                );
+                self.session.execute_unpaged(&self.insert_stmt, values)
+            })
+            .buffer_unordered(CONCURRENCY_LIMIT)
+            .for_each(|res| async {
+                if let Err(e) = res { eprintln!("DB Insert Error: {}", e); }
+            }).await;
+        Ok(())
+    }
+
+    pub async fn increment_domain_counts(&self, increments: HashMap<String, i64>) -> Result<()> {
+        const CONCURRENCY_LIMIT: usize = 64;
+
+        // Define the query string locally
+        let query = "UPDATE Arachne.domain_stats SET page_count = page_count + ? WHERE domain = ?";
+
+        stream::iter(increments)
+            .map(|(domain, count)| {
+                // Use query_unpaged (Simple Statement) instead of execute_unpaged (Prepared).
+                // This allows 'count' (i64) to be accepted as the increment value.
+                self.session.query_unpaged(query, (count, domain))
+            })
+            .buffer_unordered(CONCURRENCY_LIMIT)
+            .for_each(|res| async {
+                if let Err(e) = res { eprintln!("DB Counter Update Error: {}", e); }
+            }).await;
+        Ok(())
+    }
+
+    pub async fn check_existing_urls(&self, url_pairs: Vec<(String, String)>) -> Result<HashSet<String>> {
+        const CONCURRENCY_LIMIT: usize = 256;
+        let results = stream::iter(url_pairs)
+            .map(|(domain, url)| async move {
+                let exec = self.session.execute_unpaged(&self.check_exist_stmt, (domain, url.clone())).await;
+                match exec {
+                    Ok(res) => {
+                        // Correct logic to check if row exists
+                        match res.into_rows_result() {
+                            Ok(rows) if rows.rows_num() > 0 => Some(url),
+                            _ => None
+                        }
+                    },
+                    Err(_) => None
+                }
+            })
+            .buffer_unordered(CONCURRENCY_LIMIT)
+            .filter_map(|res| async { res })
+            .collect::<HashSet<String>>()
+            .await;
+        Ok(results)
+    }
+}
+
+async fn setup_schema(session: &Session) -> Result<()> {
+    let keyspace_cql = "CREATE KEYSPACE IF NOT EXISTS Arachne WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
+
+    // ENSURE you have dropped the old table before running this if it had TIMESTAMP type
+    let pages_table = "
         CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
-            source_url TEXT PRIMARY KEY,
-            content TEXT,
-            http_status_code INT
+            domain TEXT,
+            url TEXT,
+            tag_sequence TEXT,
+            http_status INT,
+            crawled_at BIGINT,
+            PRIMARY KEY ((domain), url)
         )";
 
+    let stats_table = "CREATE TABLE IF NOT EXISTS Arachne.domain_stats (domain TEXT PRIMARY KEY, page_count COUNTER)";
+
     session.query_unpaged(keyspace_cql, &[]).await?;
-    session.query_unpaged(table_cql, &[]).await?;
-
+    session.query_unpaged(pages_table, &[]).await?;
+    session.query_unpaged(stats_table, &[]).await?;
     Ok(())
-}
-
-/// Inserts crawled pages concurrently.
-/// Optimized for high throughput using Scylla's shard-awareness.
-pub async fn add_crawled_pages_concurrently(
-    session: &Session,
-    pages: Vec<CrawlResult>, // Takes ownership
-    prepared: &PreparedStatement
-) -> Result<()> {
-    const CONCURRENCY_LIMIT: usize = 256;
-
-    let bodies = stream::iter(pages)
-        .map(|page| {
-            // FIX: Remove the '&'.
-            // We MOVE ownership of the strings into the tuple.
-            // The 'execute_unpaged' future will capture this tuple (and the strings inside),
-            // keeping the data alive as long as the future needs it.
-            let values = (
-                page.source_url,
-                page.content,
-                page.status.as_i32(),
-            );
-            session.execute_unpaged(prepared, values)
-        })
-        .buffer_unordered(CONCURRENCY_LIMIT);
-
-    bodies.for_each(|res| async {
-        if let Err(e) = res {
-            eprintln!("DB Insert Error: {}", e);
-        }
-    }).await;
-
-    Ok(())
-}
-
-
-/// Checks which URLs already exist in the DB.
-/// Optimization: Removed Arc<Mutex> in favor of Stream filter_map.
-pub async fn check_existing_urls(
-    session: &Session,
-    urls: Vec<String>,
-    prepared: &PreparedStatement
-) -> Result<HashSet<String>> {
-    const CONCURRENCY_LIMIT: usize = 256;
-
-    // Create a stream of futures
-    let results = stream::iter(urls)
-        .map(|url| async move {
-            // Execute query
-            let execution_result = session.execute_unpaged(prepared, (&url,)).await;
-
-            match execution_result {
-                Ok(query_result) => {
-                    // Check if rows exist
-                    match query_result.into_rows_result() {
-                        Ok(rows) => {
-                            // If we get a row back, the URL exists. Return Some(url).
-                            // If None, it doesn't exist.
-                            match rows.maybe_first_row::<(String,)>() {
-                                Ok(Some(_)) => Some(url),
-                                Ok(None) => None,
-                                Err(e) => {
-                                    eprintln!("Row parse error for {}: {}", url, e);
-                                    None
-                                }
-                            }
-                        },
-                        Err(_) => None,
-                    }
-                },
-                Err(e) => {
-                    eprintln!("DB Check Error for {}: {}", url, e);
-                    None
-                }
-            }
-        })
-        // Run checks in parallel
-        .buffer_unordered(CONCURRENCY_LIMIT)
-        // Filter out None values (non-existing URLs), keeping only existing ones
-        .filter_map(|res| async { res })
-        // Collect into HashSet
-        .collect::<HashSet<String>>()
-        .await;
-
-    Ok(results)
 }

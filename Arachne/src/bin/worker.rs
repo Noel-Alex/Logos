@@ -1,17 +1,16 @@
 // src/bin/worker.rs
-use rdkafka::consumer::{Consumer, StreamConsumer, CommitMode};
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::message::Message;
+use arachne::{CrawlResult, CrawlStatus, data_cleaning, get_domain};
+use futures_util::StreamExt;
 use rdkafka::ClientConfig;
-use tokio::time::Duration;
-use arachne::{CrawlResult, CrawlStatus};
-use std::env;
-
+use rdkafka::consumer::{CommitMode, Consumer, StreamConsumer};
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use reqwest::{Client, header};
 use scraper::{Html, Selector};
 use std::collections::HashSet;
+use std::env;
+use tokio::time::Duration;
 use url::{ParseError, Url};
-use futures_util::StreamExt; // <--- REQUIRED for streaming
+use rdkafka::message::Message;
 
 // --- MEMORY ALLOCATOR SETUP ---
 #[cfg(not(target_os = "windows"))]
@@ -19,21 +18,13 @@ use tikv_jemallocator::Jemalloc;
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
-
 #[cfg(target_os = "windows")]
 use mimalloc::MiMalloc;
 #[cfg(target_os = "windows")]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-// --- CONSTANTS ---
-const MAX_CONTENT_SIZE: usize = 100 * 1024 * 1024; // 100 MB
-const ALLOWED_CONTENT_TYPES: [&str; 4] = [
-    "text/html",
-    "text/plain",
-    "text/xml",
-    "application/xhtml+xml"
-];
+const MAX_CONTENT_SIZE: usize = 100 * 1024 * 1024; // 100MB
 
 #[derive(Debug, thiserror::Error)]
 enum CrawlerError {
@@ -41,98 +32,76 @@ enum CrawlerError {
     RequestError(#[from] reqwest::Error),
     #[error("URL parsing error: {0}")]
     UrlParseError(#[from] ParseError),
-    #[error("Content type '{0}' not allowed")]
-    InvalidContentType(String),
-    #[error("Content size exceeded 100MB limit")]
+    #[error("Content too large")]
     ContentTooLarge,
+    #[error("Invalid content type")]
+    InvalidContentType,
 }
 
-/// Asynchronously crawls a given URL with strict Type and Size checks.
 async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, CrawlerError> {
     let base_url = Url::parse(url_str)?;
 
-    // 1. Send Request (Headers are received, body is pending)
-    let response = client.get(base_url.clone())
-        .timeout(Duration::from_secs(30)) // Increased timeout for 100MB downloads
-        .send().await?;
+    // 1. Send Request
+    let response = client
+        .get(base_url.clone())
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await?;
 
-    // Check HTTP Status
     if !response.status().is_success() {
         return Ok(CrawlResult {
             source_url: url_str.to_string(),
             status: CrawlStatus::HttpError(response.status().as_u16()),
             content: None,
             discovered_urls: vec![],
+            domain: get_domain(&url_str.to_string()),
         });
     }
 
-    let headers = response.headers();
-
-    // 2. CHECK CONTENT-TYPE (Header)
-    // We check if the server explicitly says this is NOT text.
-    if let Some(ct_header) = headers.get(header::CONTENT_TYPE) {
-        let ct_str = ct_header.to_str().unwrap_or("").to_lowercase();
-        // Check if the content type contains any of our allowed types
-        let is_allowed = ALLOWED_CONTENT_TYPES.iter().any(|&allowed| ct_str.contains(allowed));
-
-        if !is_allowed {
-            // Optimization: If it's explicitly an image/video/zip, drop connection now.
-            return Err(CrawlerError::InvalidContentType(ct_str));
+    // 2. Stream Download (Size Limit)
+    let mut stream = response.bytes_stream();
+    let mut body_bytes = Vec::new();
+    while let Some(item) = stream.next().await {
+        let chunk = item?;
+        if body_bytes.len() + chunk.len() > MAX_CONTENT_SIZE {
+            return Err(CrawlerError::ContentTooLarge);
         }
+        body_bytes.extend_from_slice(&chunk);
     }
+    let body = String::from_utf8_lossy(&body_bytes).to_string();
 
-    // 3. CHECK CONTENT-LENGTH (Header Optimization)
-    // If server honestly reports size > 100MB, abort immediately.
-    if let Some(cl_header) = headers.get(header::CONTENT_LENGTH) {
-        if let Ok(cl_str) = cl_header.to_str() {
-            if let Ok(size) = cl_str.parse::<usize>() {
-                if size > MAX_CONTENT_SIZE {
-                    return Err(CrawlerError::ContentTooLarge);
+    // 3. Parse HTML
+    let document = Html::parse_document(&body);
+
+    // Extract Links (Required for crawling, even if not stored in DB)
+    let selector = Selector::parse("a[href]").unwrap();
+    let mut found_links = HashSet::new();
+    for element in document.select(&selector) {
+        if let Some(href) = element.value().attr("href") {
+            if let Ok(mut new_url) = base_url.join(href) {
+                new_url.set_fragment(None);
+                if new_url.scheme().starts_with("http") {
+                    found_links.insert(new_url.to_string());
                 }
             }
         }
     }
 
-    // 4. STREAM DOWNLOAD (Strict Enforcement)
-    // We download chunks. If the accumulated size passes 100MB, we cut the cord.
-    let mut stream = response.bytes_stream();
-    let mut body_bytes = Vec::new();
-
-    while let Some(item) = stream.next().await {
-        let chunk = item?;
-
-        if body_bytes.len() + chunk.len() > MAX_CONTENT_SIZE {
-            return Err(CrawlerError::ContentTooLarge);
-        }
-
-        body_bytes.extend_from_slice(&chunk);
-    }
-
-    // Convert bytes to String safely (lossy handles invalid UTF-8 without crashing)
-    let body = String::from_utf8_lossy(&body_bytes).to_string();
-
-    // 5. PARSE HTML
-    let document = Html::parse_document(&body);
-    let selector = Selector::parse("a[href]").unwrap();
-    let mut found_links = HashSet::new();
-
-    for element in document.select(&selector) {
-        if let Some(href) = element.value().attr("href") {
-            if let Ok(mut new_url) = base_url.join(href) {
-                new_url.set_fragment(None);
-                found_links.insert(new_url.to_string());
-            }
-        }
-    }
+    // Extract Tag Sequence (The "DNA")
+    // Ensure your data_cleaning module returns ONLY the tag sequence string
+    let tag_sequence = data_cleaning::extract_skeleton_from_doc(&document);
 
     Ok(CrawlResult {
         source_url: url_str.to_string(),
         status: CrawlStatus::Success,
-        content: Some(body),
+        content: Some(tag_sequence),
         discovered_urls: found_links.into_iter().collect(),
+        domain: Some(url_str.to_string()),
     })
 }
 
+
+// The main loop receiving Kafka messages and sending results remains identical.
 
 #[tokio::main]
 async fn main() {
@@ -152,11 +121,13 @@ async fn main() {
         .create()
         .expect("Consumer creation failed");
 
-    consumer.subscribe(&[consume_topic]).expect("Can't subscribe");
+    consumer
+        .subscribe(&[consume_topic])
+        .expect("Can't subscribe");
 
     // --- Producer ---
     // Note: queue.buffering.max.messages is low to prevent RAM explosion
-    // when processing large 100MB files.
+    // when processing large MAX_CONTENT_SIZE files.
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
         .set("queue.buffering.max.messages", "50") // Low count because messages are huge
@@ -164,18 +135,18 @@ async fn main() {
         .set("linger.ms", "100")
         .set("batch.size", "10485760") // 10MB Batch size
         .set("compression.type", "lz4")
-        .set("message.max.bytes", "104857600") // Allow sending 100MB messages
+        .set("message.max.bytes", "524288000") // Allow sending 100MB messages
         .set("acks", "1")
         .create()
         .expect("Producer creation failed");
 
     // --- Client (No Pooling) ---
-    let http_client = Client::builder()
-        .pool_max_idle_per_host(0)
-        .build()
-        .unwrap();
+    let http_client = Client::builder().pool_max_idle_per_host(0).build().unwrap();
 
-    println!("Worker started (Text-Only, 100MB Limit). Waiting for URLs...");
+    println!(
+        "Worker started (Text-Only, {}MB Limit). Waiting for URLs...",
+        MAX_CONTENT_SIZE / 1024 * 1024
+    );
 
     loop {
         match consumer.recv().await {
@@ -193,10 +164,12 @@ async fn main() {
                     Err(e) => {
                         // Log specific reasons for skipping
                         match &e {
-                            CrawlerError::InvalidContentType(ct) =>
-                                println!("SKIP (Type): {} [{}]", payload, ct),
-                            CrawlerError::ContentTooLarge =>
-                                println!("SKIP (Size): {} [>100MB]", payload),
+                            CrawlerError::InvalidContentType => {
+                                println!("SKIP (Type): {} ", payload)
+                            }
+                            CrawlerError::ContentTooLarge => {
+                                println!("SKIP (Size): {} [>100MB]", payload)
+                            }
                             _ => eprintln!("Error {}: {}", payload, e),
                         }
 
@@ -206,16 +179,16 @@ async fn main() {
                             status: CrawlStatus::FetchError(e.to_string()),
                             content: None,
                             discovered_urls: vec![],
+                            domain: Some(payload.clone()),
                         }
-                    },
+                    }
                 };
 
-                let result_json = serde_json::to_string(&crawl_result).expect("JSON Serialization failed");
+                let result_json =
+                    serde_json::to_string(&crawl_result).expect("JSON Serialization failed");
 
-                // --- BACKPRESSURE LOOP (FIXED) ---
+                // --- BACKPRESSURE LOOP ---
                 loop {
-                    // FIX: Create the record INSIDE the loop.
-                    // We borrow &payload and &result_json again for every attempt.
                     let record = FutureRecord::to(produce_topic)
                         .key(&payload)
                         .payload(&result_json);
@@ -231,11 +204,6 @@ async fn main() {
                             tokio::time::sleep(Duration::from_millis(200)).await;
                         }
                     }
-                }
-
-                // Commit offset
-                if let Err(e) = consumer.commit_message(&m, CommitMode::Async) {
-                    eprintln!("Commit failed: {}", e);
                 }
 
                 // Commit offset

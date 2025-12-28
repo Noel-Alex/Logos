@@ -22,9 +22,9 @@ services:
     volumes:
       - scylla_data:/var/lib/scylla
     command:
-      - --smp=16
+      - --smp=4
       - --developer-mode=1
-      - --memory=16G
+      - --memory=4G
       - --cluster-name=arachne-cluster
     healthcheck:
       test: ["CMD-SHELL", "nodetool status | grep '^UN'"]
@@ -204,12 +204,14 @@ services:
       - 3000:3000
     volumes:
       - ./monitoring-configs/grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana.ini:/etc/grafana/grafana.ini
       - grafana_data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
       - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=scylladb-scylla-datasource
+
     networks:
       - monitoring-net
     depends_on:
@@ -234,17 +236,4 @@ services:
       networks:
         - monitoring-net
 
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: ngrok_tunnel
-    restart: unless-stopped
-    environment:
-      # Paste your real token below
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    command: "http grafana:3000" # Points to the grafana container name and port
-    ports:
-      - 4040:4040 # Local status dashboard for ngrok
-    networks:
-      - monitoring-net
-    depends_on:
-      - grafana
+

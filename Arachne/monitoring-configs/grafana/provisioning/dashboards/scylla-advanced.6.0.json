@@ -5131,7 +5131,7 @@
         ]
     },
     "timezone": "utc",
-    "title": "Advanced",
+    "title": "Scylla Advanced",
     "uid": "advanced-6-0",
     "version": 5
 }
