@@ -1,29 +1,41 @@
-use anyhow::Result;
-use arrow_array::{Int32Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
+use anyhow::{anyhow, Result};
+use arrow_array::{
+    ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
+    StringArray,
+};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use futures::stream::{self, StreamExt};
 use parquet::arrow::AsyncArrowWriter;
-use parquet::basic::{Compression, Encoding};
+use parquet::basic::{Compression};
 use parquet::file::properties::WriterProperties;
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
+use scylla::value::CqlValue;
 use std::fs::File;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use scylla::value::Row;
 
-// --- CONFIGURATION ---
+
+// --- CONFIGURATION: CHANGE THIS BLOCK ONLY ---
 const SCYLLA_URI: &str = "127.0.0.1:9042";
-const KEYSPACE: &str = "Arachne";
-const TABLE: &str = "crawled_pages";
-const PARQUET_OUTPUT: &str = "crawled_data.parquet";
+const KEYSPACE: &str = "arachne";
+const TABLE: &str = "labeled_dataset"; // Change to "labeled_dataset" or "domain_stats" etc.
+const PARQUET_OUTPUT: &str = "labeled_dataset.parquet";
 
-// STABILITY SETTINGS
-// 1 Thread = No fighting for resources.
-// It is safer to run 1 stable stream than 16 crashing ones.
-const PARALLELISM: usize = 128;
+// Tuning
+const PARALLELISM: usize = 256; // Number of parallel token ranges
+const BATCH_SIZE: usize = 2000; // Rows per Parquet RowGroup
 
-const BATCH_SIZE: usize = 500;
+// ---------------------------------------------
+
+#[derive(Clone, Debug)]
+struct ColumnMeta {
+    name: String,
+    cql_type: String,
+    arrow_type: DataType,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,30 +49,38 @@ async fn main() -> Result<()> {
         .await?;
     let session = Arc::new(session);
 
-    println!("Init: Connected. Preparing schema...");
+    // 1. DYNAMICALLY DISCOVER SCHEMA
+    println!("Init: fetching schema for {}.{}...", KEYSPACE, TABLE);
+    let columns = fetch_table_schema(&session, KEYSPACE, TABLE).await?;
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("source_url", DataType::Utf8, false),
-        Field::new("content", DataType::Utf8, true),
-        Field::new("http_status_code", DataType::Int32, true),
-    ]));
+    if columns.is_empty() {
+        return Err(anyhow!("Table {}.{} not found or has no columns", KEYSPACE, TABLE));
+    }
 
-    // Capacity 1 means: If Writer has 1 batch, Reader MUST STOP.
+    // Build Arrow Schema from discovered columns
+    let arrow_fields: Vec<Field> = columns
+        .iter()
+        .map(|c| Field::new(&c.name, c.arrow_type.clone(), true))
+        .collect();
+    let schema = Arc::new(Schema::new(arrow_fields));
+
+    println!("Init: Schema discovered with {} columns.", columns.len());
+    for col in &columns {
+        println!("  - {} ({}) -> {:?}", col.name, col.cql_type, col.arrow_type);
+    }
+
+    // 2. SETUP PIPELINE
     let (tx, mut rx) = mpsc::channel::<RecordBatch>(PARALLELISM * 2);
-
     let schema_clone = schema.clone();
 
-    // --- WRITER TASK ---
+    // 3. WRITER TASK
     let writer_handle = tokio::spawn(async move {
-        println!("Writer: Creating file...");
+        println!("Writer: Creating file: {}", PARQUET_OUTPUT);
         let file = File::create(PARQUET_OUTPUT).expect("Failed to create file");
 
-        // --- CRITICAL FIX: ROW GROUP SIZE ---
-        // By default, Parquet waits for 1024*1024 rows before writing.
-        // We force it to write every BATCH_SIZE (50 rows) to keep RAM usage low.
         let props = WriterProperties::builder()
             .set_compression(Compression::SNAPPY)
-            .set_max_row_group_size(BATCH_SIZE) // <--- THIS SAVES YOUR RAM
+            .set_max_row_group_size(BATCH_SIZE)
             .build();
 
         let mut writer =
@@ -71,52 +91,91 @@ async fn main() -> Result<()> {
 
         while let Some(batch) = rx.recv().await {
             let batch_rows = batch.num_rows();
-            if batch_rows == 0 {
-                continue;
-            }
+            if batch_rows == 0 { continue; }
 
-            // Write to internal buffer
             writer.write(&batch).await.expect("Failed to write batch");
-
-            // Note: The 'set_max_row_group_size' above ensures this actually
-            // flushes to disk frequently.
-
             total_rows += batch_rows;
-            println!(
-                "Writer: >> Flushed {} rows to disk (Total: {})",
-                batch_rows, total_rows
-            );
+
+            if total_rows % (BATCH_SIZE * 10) == 0 {
+                println!("Writer: >> Written {} rows...", total_rows);
+            }
         }
 
-        // Force final flush
         writer.close().await.expect("Failed to close writer");
         println!("Writer: FINISHED. Total rows written: {}", total_rows);
     });
 
-    // --- READER SETUP ---
+    // 4. READER TASKS
     let ranges = generate_token_ranges(PARALLELISM);
     println!("Starting scan with {} parallel streams...", PARALLELISM);
+
+    // We pass the column definitions to the workers so they know how to map data
+    let columns = Arc::new(columns);
 
     let tasks = stream::iter(ranges).map(|(start, end)| {
         let session = session.clone();
         let tx = tx.clone();
         let schema = schema.clone();
+        let columns = columns.clone();
 
-        tokio::spawn(async move { process_token_range(session, start, end, tx, schema).await })
+        tokio::spawn(async move {
+            if let Err(e) = process_token_range(session, start, end, tx, schema, columns).await {
+                eprintln!("Worker Error: {}", e);
+            }
+        })
     });
 
-    tasks
-        .buffer_unordered(PARALLELISM)
-        .collect::<Vec<_>>()
-        .await;
+    tasks.buffer_unordered(PARALLELISM).collect::<Vec<_>>().await;
 
     println!("All readers finished. Closing channel...");
-    drop(tx); // Signal writer to close file
+    drop(tx);
 
     writer_handle.await?;
     println!("Job Complete. Time taken: {:.2?}", start_time.elapsed());
     Ok(())
 }
+
+// --- DYNAMIC SCHEMA DISCOVERY ---
+
+async fn fetch_table_schema(session: &Session, keyspace: &str, table: &str) -> Result<Vec<ColumnMeta>> {
+    // Query Scylla system tables to get column info
+    let query = "SELECT column_name, kind, type FROM system_schema.columns WHERE keyspace_name = ? AND table_name = ?";
+
+    // We expect rows of (name, kind, type) strings
+    let mut rows_stream = session
+        .query_iter(query, (keyspace, table))
+        .await?
+        .rows_stream::<(String, String, String)>()?;
+
+    let mut cols = Vec::new();
+
+    while let Some(row_res) = rows_stream.next().await {
+        let (name, _kind, cql_type) = row_res?;
+
+        let arrow_type = match cql_type.as_str() {
+            "int" => DataType::Int32,
+            "bigint" | "counter" | "time" => DataType::Int64,
+            "timestamp" => DataType::Timestamp(TimeUnit::Millisecond, None),
+            "float" => DataType::Float32,
+            "double" => DataType::Float64,
+            "boolean" => DataType::Boolean,
+            // Fallback: Convert everything else (Text, UUID, Blob, Inet, Map, List) to String
+            _ => DataType::Utf8,
+        };
+
+        cols.push(ColumnMeta {
+            name,
+            cql_type,
+            arrow_type,
+        });
+    }
+
+    // Scylla doesn't guarantee order from system_schema, but we want deterministic order
+    cols.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(cols)
+}
+
+// --- DYNAMIC DATA PROCESSING ---
 
 async fn process_token_range(
     session: Arc<Session>,
@@ -124,99 +183,124 @@ async fn process_token_range(
     end_token: i64,
     tx: mpsc::Sender<RecordBatch>,
     schema: Arc<Schema>,
-) {
+    columns: Arc<Vec<ColumnMeta>>,
+) -> Result<()> {
+    // Construct SELECT query dynamically based on discovered columns
+    let col_names: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
+    let select_clause = col_names.join(", ");
+
     let query = format!(
-        "SELECT source_url, content, http_status_code FROM {}.{} WHERE token(source_url) >= ? AND token(source_url) < ?",
-        KEYSPACE, TABLE
+        "SELECT {} FROM {}.{} WHERE token(domain) >= ? AND token(domain) < ?",
+        select_clause, KEYSPACE, TABLE
     );
 
-    let mut prepared = match session.prepare(query.as_str()).await {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Prepare error: {:?}", e);
-            return;
-        }
-    };
-
-    // CRITICAL FIX: PAGING
-    // Limit network fetch to 50 rows at a time.
+    let mut prepared = session.prepare(query.as_str()).await?;
     prepared.set_page_size(BATCH_SIZE as i32);
 
+    // We rely on Row (CqlValue) parsing now, not tuple parsing
     let mut rows_stream = session
         .execute_iter(prepared, (start_token, end_token))
-        .await
-        .expect("Query execution failed")
-        .rows_stream::<(String, Option<String>, Option<i32>)>()
-        .expect("Type casting failed");
+        .await?
+        .rows_stream::<scylla::value::Row>()?; // Generic Row
 
-    let mut urls = Vec::with_capacity(BATCH_SIZE);
-    let mut contents = Vec::with_capacity(BATCH_SIZE);
-    let mut codes = Vec::with_capacity(BATCH_SIZE);
+    // Buffers for each column. We need a vector of "Builders" essentially.
+    // Since we can't easily have a Vec<Box<dyn Builder>>, we store Vec<Vec<CqlValue>>
+    // and convert to Arrow Arrays at the end of the batch.
+    let mut batch_buffer: Vec<Vec<Option<CqlValue>>> = vec![Vec::with_capacity(BATCH_SIZE); columns.len()];
 
-    while let Some(row_result) = rows_stream.next().await {
-        match row_result {
-            Ok((url, content, code)) => {
-                urls.push(url);
-                contents.push(content);
-                codes.push(code);
+    while let Some(row_res) = rows_stream.next().await {
+        let row = row_res?; // This is a Scylla Row object containing CqlValues
 
-                if urls.len() >= BATCH_SIZE {
-                    send_batch(&tx, &schema, &mut urls, &mut contents, &mut codes).await;
-                }
-            }
-            Err(e) => eprintln!("Read error: {:?}", e),
+        // Iterate columns in the row
+        for (i, cql_val) in row.columns.into_iter().enumerate() {
+            batch_buffer[i].push(cql_val);
+        }
+
+        if batch_buffer[0].len() >= BATCH_SIZE {
+            send_dynamic_batch(&tx, &schema, &columns, &mut batch_buffer).await?;
         }
     }
 
-    if !urls.is_empty() {
-        send_batch(&tx, &schema, &mut urls, &mut contents, &mut codes).await;
+    if !batch_buffer[0].is_empty() {
+        send_dynamic_batch(&tx, &schema, &columns, &mut batch_buffer).await?;
     }
+
+    Ok(())
 }
 
-async fn send_batch(
+async fn send_dynamic_batch(
     tx: &mpsc::Sender<RecordBatch>,
     schema: &Arc<Schema>,
-    urls: &mut Vec<String>,
-    contents: &mut Vec<Option<String>>,
-    codes: &mut Vec<Option<i32>>,
-) {
-    // Zero-copy move
-    let url_array = StringArray::from(std::mem::take(urls));
-    let content_array = StringArray::from(std::mem::take(contents));
-    let code_array = Int32Array::from(std::mem::take(codes));
+    columns: &[ColumnMeta],
+    buffer: &mut Vec<Vec<Option<CqlValue>>>,
+) -> Result<()> {
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
 
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(url_array),
-            Arc::new(content_array),
-            Arc::new(code_array),
-        ],
-    )
-    .unwrap();
+    // Convert Scylla buffers to Arrow Arrays
+    for (i, col_meta) in columns.iter().enumerate() {
+        // Take ownership of the data in the buffer
+        let raw_vals = std::mem::take(&mut buffer[i]);
 
-    // Blocking Send: Wait here if writer is busy
-    if let Err(_) = tx.send(batch).await {
-        // Channel closed
+        let array: ArrayRef = match col_meta.arrow_type {
+            DataType::Int32 => {
+                let iter = raw_vals.into_iter().map(|v| v.and_then(|c| c.as_int()));
+                Arc::new(Int32Array::from_iter(iter))
+            },
+            DataType::Int64 | DataType::Timestamp(_, _) => {
+                let iter = raw_vals.into_iter().map(|v| {
+                    match v {
+                        Some(CqlValue::BigInt(n)) => Some(n),
+                        Some(CqlValue::Counter(c)) => Some(c.0),
+                        Some(CqlValue::Timestamp(t)) => Some(t.0),
+                        Some(CqlValue::Time(t)) => Some(t.0),
+                        _ => None,
+                    }
+                });
+                Arc::new(Int64Array::from_iter(iter))
+            },
+            DataType::Float32 => {
+                let iter = raw_vals.into_iter().map(|v| v.and_then(|c| c.as_float()));
+                Arc::new(Float32Array::from_iter(iter))
+            },
+            DataType::Float64 => {
+                let iter = raw_vals.into_iter().map(|v| v.and_then(|c| c.as_double()));
+                Arc::new(Float64Array::from_iter(iter))
+            },
+            DataType::Boolean => {
+                let iter = raw_vals.into_iter().map(|v| v.and_then(|c| c.as_boolean()));
+                Arc::new(BooleanArray::from_iter(iter))
+            },
+            _ => {
+                // String / Text / Default fallback
+                // We format whatever CqlValue we have into a String representation
+                let iter = raw_vals.into_iter().map(|v| {
+                    v.map(|c| format!("{}", c))
+                });
+                Arc::new(StringArray::from_iter(iter))
+            }
+        };
+        arrays.push(array);
     }
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+
+    if let Err(_) = tx.send(batch).await {
+        // Channel closed, graceful exit
+    }
+
+    Ok(())
 }
 
 fn generate_token_ranges(splits: usize) -> Vec<(i64, i64)> {
     let mut ranges = Vec::new();
     let min = i64::MIN;
     let max = i64::MAX;
-
-    let total_space = (max as u128).wrapping_sub(min as u128);
-    let step = total_space / splits as u128;
-
+    let total = (max as u128).wrapping_sub(min as u128);
+    let step = total / splits as u128;
     let mut current = min as u128;
 
     for i in 0..splits {
-        let next = if i == splits - 1 {
-            max as u128
-        } else {
-            current + step
-        };
+        let next = if i == splits - 1 { max as u128 } else { current + step };
         ranges.push((current as i64, next as i64));
         current = next;
     }

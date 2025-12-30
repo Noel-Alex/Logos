@@ -8,53 +8,77 @@ const VOID_TAGS: [&str; 14] = [
     "track", "wbr",
 ];
 
-pub fn extract_skeleton_from_doc(document: &Html) -> String {
-    let mut skeleton = String::with_capacity(4096);
-    walk_and_build(document.tree.root(), &mut skeleton);
-    skeleton
+// Helper enum to simulate recursion state
+enum TraversalState<'a> {
+    Enter(NodeRef<'a, Node>),
+    Leave(&'a str), // Stores tag_name for the closing tag
 }
 
-fn walk_and_build(node: NodeRef<Node>, buffer: &mut String) {
-    if let Element(element) = node.value() {
-        let tag_name = &*element.name.local;
+pub fn extract_skeleton_from_doc(document: &Html) -> String {
+    let mut buffer = String::with_capacity(8192); // Increased initial capacity
+    let mut stack = Vec::with_capacity(64); // The "Heap Stack"
 
-        buffer.push('<');
-        buffer.push_str(tag_name);
+    // Start with the root
+    stack.push(TraversalState::Enter(document.tree.root()));
 
-        // --- FIXED SECTION START ---
-        for (name, value) in element.attrs() {
-            // 'name' and 'value' are already &str here
-            if KEEP_ATTRS.contains(&name) {
-                buffer.push(' ');
-                buffer.push_str(name);
-                buffer.push_str("=\"");
-                buffer.push_str(value);
-                buffer.push('"');
+    while let Some(state) = stack.pop() {
+        match state {
+            TraversalState::Enter(node) => {
+                if let Element(element) = node.value() {
+                    let tag_name = &*element.name.local;
+
+                    // 1. Build Opening Tag
+                    buffer.push('<');
+                    buffer.push_str(tag_name);
+
+                    // 2. Attributes
+                    for (name, value) in element.attrs() {
+                        if KEEP_ATTRS.contains(&name) {
+                            buffer.push(' ');
+                            buffer.push_str(name);
+                            buffer.push_str("=\"");
+                            buffer.push_str(value);
+                            buffer.push('"');
+                        }
+                    }
+
+                    // 3. Handle Void Tags (Self-closing)
+                    if VOID_TAGS.contains(&tag_name) {
+                        buffer.push_str(" />");
+                        continue; // No children, no closing tag needed
+                    }
+
+                    buffer.push('>');
+
+                    // 4. Schedule Closing Tag (Pushed BEFORE children so it pops AFTER children)
+                    stack.push(TraversalState::Leave(tag_name));
+
+                    // 5. Schedule Children
+                    // NOTE: specific check to skip SVG internals as per your original logic
+                    if tag_name != "svg" {
+                        // We must push children in REVERSE order so the first child
+                        // is at the top of the stack and processed next.
+                        for child in node.children().rev() {
+                            stack.push(TraversalState::Enter(child));
+                        }
+                    }
+                } else {
+                    // Handle Root Node (Document root is not an Element)
+                    if node.parent().is_none() {
+                        for child in node.children().rev() {
+                            stack.push(TraversalState::Enter(child));
+                        }
+                    }
+                }
             }
-        }
-        // --- FIXED SECTION END ---
-
-        if VOID_TAGS.contains(&tag_name) {
-            buffer.push_str(" />");
-            return;
-        }
-
-        buffer.push('>');
-
-        if tag_name != "svg" {
-            for child in node.children() {
-                walk_and_build(child, buffer);
-            }
-        }
-
-        buffer.push_str("</");
-        buffer.push_str(tag_name);
-        buffer.push('>');
-    } else {
-        if node.parent().is_none() {
-            for child in node.children() {
-                walk_and_build(child, buffer);
+            TraversalState::Leave(tag_name) => {
+                // 6. Build Closing Tag
+                buffer.push_str("</");
+                buffer.push_str(tag_name);
+                buffer.push('>');
             }
         }
     }
+
+    buffer
 }

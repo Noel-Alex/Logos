@@ -115,7 +115,7 @@ async fn main() {
     let group_id = "arachne-worker-group";
 
     // Concurrency Limit
-    const PARALLEL_REQUESTS: usize = 1000;
+    const PARALLEL_REQUESTS: usize = 10000;
 
     // --- KAFKA CONSUMER ---
     let consumer: StreamConsumer = ClientConfig::new()
@@ -206,7 +206,7 @@ async fn main() {
                         // LOG: Failure
                         match e {
                              CrawlerError::RequestError(ref e) if e.is_timeout() => {
-                                 println!("⏳  TIMEOUT     {}", payload);
+                                 //println!("⏳  TIMEOUT     {}", payload);
                              },
                              CrawlerError::ContentTooLarge => {
                                  println!("📦  TOO BIG     {}", payload);
