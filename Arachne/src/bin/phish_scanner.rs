@@ -15,10 +15,10 @@ use tokio::time::sleep;
 use url::Url;
 
 // --- CONFIGURATION ---
-const CHECK_INTERVAL_MINUTES: u64 = 5; // Run every 5 minutes
-const URLSCAN_SEARCH_LIMIT: u32 = 1000; // Max URLs to fetch per call (max 10,000)
+const CHECK_INTERVAL_MINUTES: u64 = 5;
+const URLSCAN_SEARCH_LIMIT: u32 = 1000;
 const KAFKA_TOPIC: &str = "urls-to-crawl";
-const STORAGE_DIR: &str = "urlscan_batches"; // Folder to save backup files
+const STORAGE_DIR: &str = "urlscan_batches";
 
 // --- API RESPONSE STRUCTURES ---
 #[derive(Deserialize, Debug)]

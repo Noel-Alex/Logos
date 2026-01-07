@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use futures::{stream, StreamExt};
 use std::time::Instant;
 
-// --- LUDICROUS SPEED SETTINGS ---
+
 const CONCURRENT_DOMAINS: usize = 1024; // Process 1024 websites in parallel
 const CONCURRENT_WRITES: usize = 256;   // 256 Async Inserts per website
 const POOL_SIZE_PER_SHARD: usize = 16;  // 16 Connections per CPU Core

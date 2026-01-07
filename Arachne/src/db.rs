@@ -1,12 +1,13 @@
 // src/db.rs
 use crate::CrawlResult;
 use anyhow::Result;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use scylla::client::session::Session;
 use scylla::client::session_builder::SessionBuilder;
 use scylla::statement::prepared::PreparedStatement;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::time::Duration;
 
 pub struct ArachneRepo {
     session: Session,
@@ -22,21 +23,21 @@ impl ArachneRepo {
 
         let session = SessionBuilder::new().known_node(uri).build().await?;
 
+        // 1. SETUP SCHEMA (With Safety Waits)
         setup_schema(&session).await?;
 
         println!("Preparing statements...");
 
-        // Stmt 1: Insert Content
+        // 2. PREPARE STATEMENTS
+        // We explicitly use the keyspace prefix to be safe
         let insert_stmt = session.prepare(
             "INSERT INTO Arachne.crawled_pages (domain, url, tag_sequence, http_status, crawled_at) VALUES (?, ?, ?, ?, ?)"
         ).await?;
 
-        // Stmt 2: Get Domain Count
         let get_count_stmt = session.prepare(
             "SELECT page_count FROM Arachne.domain_stats WHERE domain = ?"
         ).await?;
 
-        // Stmt 3: Check URL Existence
         let check_exist_stmt = session.prepare(
             "SELECT url FROM Arachne.crawled_pages WHERE domain = ? AND url = ?"
         ).await?;
@@ -80,29 +81,40 @@ impl ArachneRepo {
                     page.source_url,
                     page.content.unwrap_or_default(),
                     page.status.as_i32(),
-                    chrono::Utc::now().timestamp_millis(), // BigInt
+                    chrono::Utc::now().timestamp_millis(),
                 );
-                self.session.execute_unpaged(&self.insert_stmt, values)
+                // We clone the statement reference for the async block
+                let stmt = &self.insert_stmt;
+                let session = &self.session;
+                async move {
+                    session.execute_unpaged(stmt, values).await
+                }
             })
             .buffer_unordered(CONCURRENCY_LIMIT)
             .for_each(|res| async {
-                if let Err(e) = res { eprintln!("DB Insert Error: {}", e); }
+                if let Err(e) = res {
+                    eprintln!("❌ DB Insert Error: {}", e);
+                }
             }).await;
         Ok(())
     }
 
     pub async fn increment_domain_counts(&self, increments: HashMap<String, i64>) -> Result<()> {
         const CONCURRENCY_LIMIT: usize = 64;
-
-        // Using Query String Interpolation to bypass strict driver type checks for Counters
         stream::iter(increments)
             .map(|(domain, count)| {
+                // Safe because count is i64
                 let query = format!("UPDATE Arachne.domain_stats SET page_count = page_count + {} WHERE domain = ?", count);
-                self.session.query_unpaged(query, (domain,))
+                let session = &self.session;
+                async move {
+                    session.query_unpaged(query, (domain,)).await
+                }
             })
             .buffer_unordered(CONCURRENCY_LIMIT)
             .for_each(|res| async {
-                if let Err(e) = res { eprintln!("DB Counter Update Error: {}", e); }
+                if let Err(e) = res {
+                    eprintln!("❌ DB Counter Error: {}", e);
+                }
             }).await;
         Ok(())
     }
@@ -131,9 +143,16 @@ impl ArachneRepo {
 }
 
 async fn setup_schema(session: &Session) -> Result<()> {
-    let keyspace_cql = "CREATE KEYSPACE IF NOT EXISTS Arachne WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
+    println!("Initializing Schema...");
 
-    // Ensure crawled_at is BIGINT
+    // 1. Create Keyspace
+    let keyspace_cql = "CREATE KEYSPACE IF NOT EXISTS Arachne WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}";
+    session.query_unpaged(keyspace_cql, &[]).await?;
+
+    // CRITICAL FIX: Wait for the keyspace to exist before creating tables
+    session.await_schema_agreement().await?;
+
+    // 2. Create Pages Table
     let pages_table = "
         CREATE TABLE IF NOT EXISTS Arachne.crawled_pages (
             domain TEXT,
@@ -143,11 +162,15 @@ async fn setup_schema(session: &Session) -> Result<()> {
             crawled_at BIGINT,
             PRIMARY KEY ((domain), url)
         )";
-
-    let stats_table = "CREATE TABLE IF NOT EXISTS Arachne.domain_stats (domain TEXT PRIMARY KEY, page_count COUNTER)";
-
-    session.query_unpaged(keyspace_cql, &[]).await?;
     session.query_unpaged(pages_table, &[]).await?;
+
+    // 3. Create Stats Table
+    let stats_table = "CREATE TABLE IF NOT EXISTS Arachne.domain_stats (domain TEXT PRIMARY KEY, page_count COUNTER)";
     session.query_unpaged(stats_table, &[]).await?;
+
+    // Wait for tables to exist before returning
+    session.await_schema_agreement().await?;
+
+    println!("Schema Initialized.");
     Ok(())
 }

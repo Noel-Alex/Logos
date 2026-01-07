@@ -43,7 +43,6 @@ async fn main() {
         }
     }
 
-    println!("\n---------------- RESULTS ----------------");
     println!("Total Rows Scanned: {}", total_scanned);
     println!("Phishing Sites (200 OK): {}", count);
     println!("Time Elapsed: {:.2?}", start.elapsed());

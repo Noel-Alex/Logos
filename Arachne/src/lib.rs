@@ -16,7 +16,6 @@ pub struct CrawlResult {
     pub source_url: String,
     pub status: CrawlStatus,
     pub domain: Option<String>,
-    // This holds the string output from your data_cleaning.rs
     pub content: Option<String>,
     pub discovered_urls: Vec<String>,
 }
@@ -38,8 +37,6 @@ impl CrawlStatus {
         match self {
             CrawlStatus::Success => 200,
             CrawlStatus::HttpError(code) => *code as i32,
-            // We use 0 to represent a non-HTTP error (like DNS failure)
-            // since your DB schema only has an INT column.
             CrawlStatus::FetchError(_) => 0,
             CrawlStatus::InvalidContentType => 1000,
         }

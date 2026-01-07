@@ -13,13 +13,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use url::Url;
 
-// --- CONFIGURATION FOR LIMITS ---
-// Set to 0 for NO LIMIT (Process All)
-const PHISHING_CSV_LIMIT: usize = 0;      // e.g., 10000
+const PHISHING_CSV_LIMIT: usize = 0;
 const PHISHING_TXT_LIMIT: usize = 0;
-const LEGIT_CSV_LIMIT: usize = 10_000;    // Example: Only take top 10k legit sites
+const LEGIT_CSV_LIMIT: usize = 10_000;
 
-// --- CONTEXT FOR LOGGING KAFKA ERRORS ---
 struct LoggingContext;
 impl ClientContext for LoggingContext {}
 impl ProducerContext for LoggingContext {
@@ -33,7 +30,6 @@ impl ProducerContext for LoggingContext {
 
 type LoggingProducer = BaseProducer<LoggingContext>;
 
-// --- HELPER FUNCTIONS ---
 
 fn extract_root_domain(url_str: &str) -> String {
     if let Ok(url) = Url::parse(url_str) {
@@ -89,7 +85,6 @@ async fn main() {
         .await
         .expect("Failed to connect to Scylla");
 
-    // Ensure schema
     session.query_unpaged("CREATE KEYSPACE IF NOT EXISTS Arachne WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}", &[]).await.ok();
     session.query_unpaged("CREATE TABLE IF NOT EXISTS Arachne.domain_labels (domain TEXT PRIMARY KEY, is_phishing BOOLEAN, source TEXT)", &[]).await.unwrap();
 
@@ -97,14 +92,12 @@ async fn main() {
         "INSERT INTO Arachne.domain_labels (domain, is_phishing, source) VALUES (?, ?, ?)"
     ).await.unwrap());
 
-    // Statement to Check Existence
     let check_stmt = Arc::new(session.prepare(
         "SELECT domain FROM Arachne.domain_labels WHERE domain = ?"
     ).await.unwrap());
 
     println!("✔ Scylla Ready.");
 
-    // 2. CREATE KAFKA PRODUCER
     println!("[2/5] Connecting to Kafka...");
     let producer: LoggingProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
@@ -117,28 +110,22 @@ async fn main() {
 
     let start_time = Instant::now();
 
-    // 3. PROCESS DATASETS
 
-    // A. Phishing CSV
     println!("\n[3/5] Processing Phishing CSV (Limit: {})...", if PHISHING_CSV_LIMIT == 0 { "ALL".to_string() } else { PHISHING_CSV_LIMIT.to_string() });
     process_csv("phishing.csv", &producer, &session, &insert_stmt, &check_stmt, topic_name, true, PHISHING_CSV_LIMIT).await;
 
-    // B. Phishing TXT
     println!("\n[4/5] Processing Phishing TXT (Limit: {})...", if PHISHING_TXT_LIMIT == 0 { "ALL".to_string() } else { PHISHING_TXT_LIMIT.to_string() });
     process_text_file("phishing.txt", &producer, &session, &insert_stmt, &check_stmt, topic_name, true, PHISHING_TXT_LIMIT).await;
 
-    // C. Legit CSV
     println!("\n[5/5] Processing Legit CSV (Limit: {})...", if LEGIT_CSV_LIMIT == 0 { "ALL".to_string() } else { LEGIT_CSV_LIMIT.to_string() });
     //process_csv("legit.csv", &producer, &session, &insert_stmt, &check_stmt, topic_name, false, LEGIT_CSV_LIMIT).await;
 
-    // 4. FLUSH
     println!("\n[...] Flushing Kafka buffers (waiting 10s)...");
     producer.flush(Duration::from_secs(10));
 
     println!("\n✔ All Done. Total Runtime: {:.2?}", start_time.elapsed());
 }
 
-/// Core Logic: Checks DB, Adds Label, Pushes to Kafka
 async fn submit_url_to_system(
     url_raw: &str,
     is_phishing: bool,
@@ -157,14 +144,12 @@ async fn submit_url_to_system(
 
     let root_domain = extract_root_domain(&full_url);
 
-    // 1. CHECK EXISTENCE
-    // We assume if the label exists, the URL was already queued previously.
-    // Using execute_unpaged for check
+
     match session.execute_unpaged(check_stmt, (&root_domain,)).await {
         Ok(result) => {
             if let Ok(rows) = result.into_rows_result() {
                 if rows.rows_num() > 0 {
-                    return false; // Exists
+                    return false;
                 }
             }
         },
@@ -174,23 +159,19 @@ async fn submit_url_to_system(
         }
     }
 
-    // 2. INSERT LABEL
-    // Using execute_unpaged for insert
     if let Err(e) = session.execute_unpaged(insert_stmt, (&root_domain, is_phishing, source_tag)).await {
         eprintln!("DB Write Error {}: {}", root_domain, e);
     }
 
-    // 3. KAFKA QUEUE
     if let Err(_) = producer.send(
         BaseRecord::to(topic).payload(&full_url).key(&root_domain),
     ) {
         eprintln!("Kafka Buffer Full!");
     }
 
-    true // Successfully added
+    true
 }
 
-/// Process .txt files (One URL per line)
 async fn process_text_file(
     filename: &str,
     producer: &LoggingProducer,
@@ -199,7 +180,7 @@ async fn process_text_file(
     check_stmt: &scylla::statement::prepared::PreparedStatement,
     topic: &str,
     is_phishing: bool,
-    limit: usize, // NEW: Limit Parameter
+    limit: usize,
 ) {
     if !Path::new(filename).exists() {
         eprintln!("⚠ Note: File '{}' not found. Skipping.", filename);
@@ -216,9 +197,8 @@ async fn process_text_file(
     println!("> Reading '{}'...", filename);
 
     for line_res in reader.lines() {
-        // LIMIT CHECK: If limit is > 0 and we reached it, stop.
         if limit > 0 && processed >= limit {
-            println!("\n🛑 Reached limit of {} items for {}.", limit, filename);
+            println!("\nReached limit of {} items for {}.", limit, filename);
             break;
         }
 
@@ -248,7 +228,6 @@ async fn process_text_file(
     println!("\r> Finished '{}': {} New URLs Queued, {} Duplicates Skipped.", filename, processed, skipped);
 }
 
-/// Process .csv files
 async fn process_csv(
     filename: &str,
     producer: &LoggingProducer,
@@ -257,10 +236,10 @@ async fn process_csv(
     check_stmt: &scylla::statement::prepared::PreparedStatement,
     topic: &str,
     is_phishing: bool,
-    limit: usize, // NEW: Limit Parameter
+    limit: usize,
 ) {
     if !Path::new(filename).exists() {
-        eprintln!("⚠ Note: File '{}' not found. Skipping.", filename);
+        eprintln!("Note: File '{}' not found. Skipping.", filename);
         return;
     }
 
@@ -278,9 +257,8 @@ async fn process_csv(
     println!("> Reading '{}'...", filename);
 
     for result in rdr.records() {
-        // LIMIT CHECK
         if limit > 0 && processed >= limit {
-            println!("\n🛑 Reached limit of {} items for {}.", limit, filename);
+            println!("\nReached limit of {} items for {}.", limit, filename);
             break;
         }
 

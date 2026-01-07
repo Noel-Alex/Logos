@@ -12,15 +12,13 @@ use tokio::time;
 use url::Url;
 
 // --- CONFIGURATION ---
-const UPDATE_INTERVAL_MINUTES: u64 = 60; // Check every hour
+const UPDATE_INTERVAL_MINUTES: u64 = 60;
 const USER_AGENT: &str = "ArachneCrawler/1.0 (Student Project)";
 
-// List of mirrors/formats to try in order.
-// If index 0 fails, it tries index 1, etc.
+
 const DATA_SOURCES: &[(&str, Format)] = &[
     ("http://data.phishtank.com/data/online-valid.json", Format::Json),
     ("http://data.phishtank.com/data/online-valid.csv", Format::Csv),
-    // Add your API key versions here if you have one:
     // ("http://data.phishtank.com/data/<KEY>/online-valid.json", Format::Json),
 ];
 
@@ -40,10 +38,8 @@ struct PhishTankJsonEntry {
 #[derive(Deserialize, Debug)]
 struct PhishTankCsvEntry {
     url: String,
-    // CSV reader will ignore extra columns automatically
 }
 
-// --- KAFKA CONTEXT ---
 struct LoggingContext;
 impl ClientContext for LoggingContext {}
 impl ProducerContext for LoggingContext {
@@ -56,7 +52,6 @@ impl ProducerContext for LoggingContext {
 }
 type LoggingProducer = BaseProducer<LoggingContext>;
 
-// --- HELPER FUNCTIONS ---
 
 fn extract_root_domain(url_str: &str) -> String {
     if let Ok(url) = Url::parse(url_str) {
@@ -131,11 +126,11 @@ async fn main() {
     // 3. SETUP HTTP CLIENT
     let http_client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        .timeout(Duration::from_secs(120)) // Longer timeout for large downloads
+        .timeout(Duration::from_secs(120))
         .build()
         .expect("Failed to build HTTP client");
 
-    println!("✔ System Ready. Starting Update Loop (Every {} mins).", UPDATE_INTERVAL_MINUTES);
+    println!("System Ready. Starting Update Loop (Every {} mins).", UPDATE_INTERVAL_MINUTES);
 
     let mut interval = time::interval(Duration::from_secs(UPDATE_INTERVAL_MINUTES * 60));
 
@@ -145,14 +140,14 @@ async fn main() {
 
         let mut success = false;
 
-        // --- ITERATE THROUGH SOURCES ---
+        // ITERATE THROUGH SOURCES
         for (url, format) in DATA_SOURCES {
-            println!("> Trying source: {} ({:?})", url, format); // Debug print format
+            println!("> Trying source: {} ({:?})", url, format);
             match fetch_and_process(url, *format, &http_client, &producer, &session, &insert_stmt, &check_stmt, topic_name).await {
                 Ok((new, skipped)) => {
                     println!("✔ Success! Added: {} | Skipped: {}", new, skipped);
                     success = true;
-                    break; // Stop trying other mirrors, we got the data
+                    break;
                 }
                 Err(e) => {
                     eprintln!("⚠ Failed to fetch from {}: {}", url, e);
@@ -162,7 +157,7 @@ async fn main() {
         }
 
         if !success {
-            eprintln!("❌ All data sources failed. Will retry in {} mins.", UPDATE_INTERVAL_MINUTES);
+            eprintln!("All data sources failed. Will retry in {} mins.", UPDATE_INTERVAL_MINUTES);
         }
     }
 }
@@ -203,7 +198,6 @@ async fn fetch_and_process(
 
             let mut list = Vec::new();
             for result in rdr.deserialize() {
-                // CSV crate tries to match struct fields to header names automatically
                 let entry: PhishTankCsvEntry = result?;
                 list.push(entry.url);
             }
@@ -267,9 +261,6 @@ async fn submit_url_to_system(
     let root_domain = extract_root_domain(&full_url);
 
     // 1. CHECK EXISTENCE
-    // We use execute_unpaged. Note: Scylla driver 1.0+ might require .rows_stream() logic if this was a SELECT *,
-    // but for simple checks execute_unpaged usually works.
-    // If you get errors, switch to the logic used in your merger script.
     match session.execute_unpaged(check_stmt, (&root_domain,)).await {
         Ok(result) => {
             if let Ok(rows) = result.into_rows_result() {
@@ -279,8 +270,6 @@ async fn submit_url_to_system(
             }
         },
         Err(e) => {
-            // If read failed, log and assume safer to skip or retry.
-            // We'll skip to prevent crashing loops.
             eprintln!("DB Read Error {}: {}", root_domain, e);
             return false;
         }

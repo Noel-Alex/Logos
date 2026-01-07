@@ -13,12 +13,11 @@ volumes:
     driver: local
 
 services:
-  # --- DATA STORE STACK ---
   scylla:
     image: scylladb/scylla:latest
     container_name: scylla
     ports:
-      - "9042:9042" # Native CQL
+      - "9042:9042"
     volumes:
       - scylla_data:/var/lib/scylla
     command:
@@ -53,14 +52,13 @@ services:
     networks:
       - monitoring-net
 
-  # --- STREAMING STACK (REDPANDA) ---
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     container_name: redpanda
     command:
       - redpanda start
-      - --smp 4  # Use 1 CPU core
-      - --memory 2G # Explicit RAM limit
+      - --smp 4 #No. of Cores
+      - --memory 2G #Ram
       - --reserve-memory 0M
       - --overprovisioned
       - --node-id 0
@@ -69,10 +67,8 @@ services:
       - --pandaproxy-addr 0.0.0.0:8082
       - --kafka-addr PLAIN://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
       - --rpc-addr 0.0.0.0:33145
-      # Increase max request size to 20MB globally
       - --set redpanda.kafka_batch_max_bytes=209715200
       - --set redpanda.kafka_max_message_bytes=209715200
-      #- --set max.poll.interval.ms=18000000
     ports:
       - "9092:9092"
       - "9093:9093"
@@ -84,7 +80,7 @@ services:
     networks:
       - monitoring-net
 
-  # --- INIT JOB (FIXED SYNTAX) ---
+
   redpanda-init:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     container_name: redpanda-init
@@ -129,12 +125,10 @@ services:
     networks:
       - monitoring-net
 
-  # --- MONITORING STACK ---
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
-    # Reduce local Prometheus retention to 2 days to save space,
-    # since long-term data goes to VictoriaMetrics.
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.retention.time=2d'
@@ -147,7 +141,7 @@ services:
     depends_on:
       - redpanda
       - scylla
-      - victoriametrics # Ensure VM is up before Prometheus tries to write to it
+      - victoriametrics
 
   victoriametrics:
     image: victoriametrics/victoria-metrics:latest
@@ -157,7 +151,7 @@ services:
     volumes:
       - vm_data:/victoria-metrics-data
     command:
-      - "-retentionPeriod=1y" # Keep data for 1 year (adjust as needed: 6m, 2y, etc.)
+      - "-retentionPeriod=1y"
       - "-storageDataPath=/victoria-metrics-data"
     networks:
       - monitoring-net
@@ -219,20 +213,20 @@ services:
       - loki
 
   cadvisor:
-      image: gcr.io/cadvisor/cadvisor:v0.47.2     # Use a pinned version for stability
+      image: gcr.io/cadvisor/cadvisor:v0.47.2
       container_name: cadvisor
       restart: unless-stopped
-      privileged: true                             # Required to access host metrics
+      privileged: true
       devices:
         - /dev/kmsg
       volumes:
-        - /:/rootfs:ro                             # Read host filesystem
-        - /var/run:/var/run:ro                     # Read Docker socket
-        - /sys:/sys:ro                             # Read Linux Kernel stats
-        - /var/lib/docker/:/var/lib/docker:ro      # Read Docker container storage
+        - /:/rootfs:ro
+        - /var/run:/var/run:ro
+        - /sys:/sys:ro
+        - /var/lib/docker/:/var/lib/docker:ro
         - /dev/disk/:/dev/disk:ro
       ports:
-        - "8085:8080"                              # Expose on host port 8081 (8080 is taken by Kafka-UI)
+        - "8085:8080"
       networks:
         - monitoring-net
 

@@ -25,7 +25,7 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const MAX_CONTENT_SIZE: usize = 100 * 1024 * 1024; // 100MB
+const MAX_CONTENT_SIZE: usize = 100 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 enum CrawlerError {
@@ -59,7 +59,7 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
         });
     }
 
-    // 2. Stream Download (Size Limit)
+    // 2. Stream Download (To enforce Size Limit)
     let mut stream = response.bytes_stream();
     let mut body_bytes = Vec::new();
     while let Some(item) = stream.next().await {
@@ -74,7 +74,7 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
     // 3. Parse HTML
     let document = Html::parse_document(&body);
 
-    // Extract Links (Required for crawling, even if not stored in DB)
+    // Extract Links
     let selector = Selector::parse("a[href]").unwrap();
     let mut found_links = HashSet::new();
     for element in document.select(&selector) {
@@ -88,8 +88,7 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
         }
     }
 
-    // Extract Tag Sequence (The "DNA")
-    // Ensure your data_cleaning module returns ONLY the tag sequence string
+    // Extract Tag Sequence
     let tag_sequence = data_cleaning::extract_skeleton_from_doc(&document);
 
     Ok(CrawlResult {
@@ -108,16 +107,14 @@ async fn crawl_url(client: &Client, url_str: &str) -> Result<CrawlResult, Crawle
 async fn main() {
     dotenvy::dotenv().ok();
 
-    // --- CONFIGURATION ---
     let bootstrap_servers = env::var("KAFKA_SERVER").expect("KAFKA_SERVER not in .env");
     let consume_topic = "urls-to-crawl";
     let produce_topic = "crawl-results";
-    let group_id = "arachne-worker-group";
+    let group_id = "arachne-worker-group-reqwest";
 
-    // Concurrency Limit
     const PARALLEL_REQUESTS: usize = 10000;
 
-    // --- KAFKA CONSUMER ---
+    // KAFKA CONSUMER
     let consumer: StreamConsumer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
         .set("group.id", group_id)
@@ -130,7 +127,7 @@ async fn main() {
 
     consumer.subscribe(&[consume_topic]).expect("Can't subscribe");
 
-    // --- KAFKA PRODUCER ---
+    // KAFKA PRODUCER
     let producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &bootstrap_servers)
         .set("queue.buffering.max.messages", "2000")
@@ -140,7 +137,7 @@ async fn main() {
         .create()
         .expect("Producer creation failed");
 
-    // --- OPTIMIZED HTTP CLIENT ---
+    // HTTP CLIENT
     let http_client = Client::builder()
         .trust_dns(true) // Key for performance
         .tcp_keepalive(None)
@@ -167,7 +164,7 @@ async fn main() {
                 Ok(msg) => msg,
                 Err(e) => {
                     eprintln!("⚠️  Kafka Recv Error: {}", e);
-                    panic!("Kafka connection lost"); // Panic to restart if connection dies
+                    panic!("Kafka connection lost");
                 }
             }
         })
@@ -182,14 +179,9 @@ async fn main() {
                     _ => return,
                 };
 
-                // LOG: Start
-                // (Optional: Comment this out if it's too fast to read)
-                // println!("..  Fetching: {}", payload);
-
                 let crawl_result = match crawl_url(&http_client, &payload).await {
                     Ok(res) => {
-                        // LOG: Success
-                        // We check the status inside the result to see if it was a 200 or 404
+
                         match res.status {
                             CrawlStatus::Success => {
                                 let size_kb = res.content.as_ref().map(|s| s.len()).unwrap_or(0) / 1024;
@@ -203,10 +195,9 @@ async fn main() {
                         res
                     },
                     Err(e) => {
-                        // LOG: Failure
                         match e {
                              CrawlerError::RequestError(ref e) if e.is_timeout() => {
-                                 //println!("⏳  TIMEOUT     {}", payload);
+                                 println!("⏳  TIMEOUT     {}", payload);
                              },
                              CrawlerError::ContentTooLarge => {
                                  println!("📦  TOO BIG     {}", payload);
@@ -216,7 +207,6 @@ async fn main() {
                              }
                         }
 
-                        // Return error result for DB tracking
                         CrawlResult {
                             source_url: payload.clone(),
                             status: CrawlStatus::FetchError(e.to_string()),
@@ -229,7 +219,6 @@ async fn main() {
 
                 let result_json = serde_json::to_string(&crawl_result).unwrap_or_default();
 
-                // Send to Kafka
                 loop {
                     let record = FutureRecord::to(produce_topic)
                         .key(&payload)
@@ -247,6 +236,5 @@ async fn main() {
         })
         .buffer_unordered(PARALLEL_REQUESTS);
 
-    // Drive the stream
     stream_processor.for_each(|_| async {}).await;
 }

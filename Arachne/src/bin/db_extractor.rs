@@ -1,3 +1,4 @@
+// src/bin/db_extractor
 use anyhow::{anyhow, Result};
 use arrow_array::{
     ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, RecordBatch,
@@ -18,17 +19,15 @@ use tokio::time::Instant;
 use scylla::value::Row;
 
 
-// --- CONFIGURATION: CHANGE THIS BLOCK ONLY ---
 const SCYLLA_URI: &str = "127.0.0.1:9042";
 const KEYSPACE: &str = "arachne";
-const TABLE: &str = "labeled_dataset"; // Change to "labeled_dataset" or "domain_stats" etc.
+const TABLE: &str = "labeled_dataset";
 const PARQUET_OUTPUT: &str = "labeled_dataset.parquet";
 
 // Tuning
 const PARALLELISM: usize = 256; // Number of parallel token ranges
 const BATCH_SIZE: usize = 2000; // Rows per Parquet RowGroup
 
-// ---------------------------------------------
 
 #[derive(Clone, Debug)]
 struct ColumnMeta {
@@ -201,15 +200,13 @@ async fn process_token_range(
     let mut rows_stream = session
         .execute_iter(prepared, (start_token, end_token))
         .await?
-        .rows_stream::<scylla::value::Row>()?; // Generic Row
+        .rows_stream::<scylla::value::Row>()?;
 
     // Buffers for each column. We need a vector of "Builders" essentially.
-    // Since we can't easily have a Vec<Box<dyn Builder>>, we store Vec<Vec<CqlValue>>
-    // and convert to Arrow Arrays at the end of the batch.
     let mut batch_buffer: Vec<Vec<Option<CqlValue>>> = vec![Vec::with_capacity(BATCH_SIZE); columns.len()];
 
     while let Some(row_res) = rows_stream.next().await {
-        let row = row_res?; // This is a Scylla Row object containing CqlValues
+        let row = row_res?;
 
         // Iterate columns in the row
         for (i, cql_val) in row.columns.into_iter().enumerate() {
@@ -236,9 +233,7 @@ async fn send_dynamic_batch(
 ) -> Result<()> {
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
 
-    // Convert Scylla buffers to Arrow Arrays
     for (i, col_meta) in columns.iter().enumerate() {
-        // Take ownership of the data in the buffer
         let raw_vals = std::mem::take(&mut buffer[i]);
 
         let array: ArrayRef = match col_meta.arrow_type {
@@ -271,8 +266,6 @@ async fn send_dynamic_batch(
                 Arc::new(BooleanArray::from_iter(iter))
             },
             _ => {
-                // String / Text / Default fallback
-                // We format whatever CqlValue we have into a String representation
                 let iter = raw_vals.into_iter().map(|v| {
                     v.map(|c| format!("{}", c))
                 });
@@ -285,7 +278,6 @@ async fn send_dynamic_batch(
     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
 
     if let Err(_) = tx.send(batch).await {
-        // Channel closed, graceful exit
     }
 
     Ok(())

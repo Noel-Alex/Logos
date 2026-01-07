@@ -12,10 +12,8 @@ use tokio::sync::{Semaphore, mpsc, Mutex};
 use tokio::time::{self, Duration, Instant};
 use url::Url;
 
-// --- CONFIGURATION ---
+
 const MAX_URLS_QUEUED_PER_SITE: i64 = 500;
-// CRITICAL FIX: Smaller batches = Smoother streaming.
-// Don't choke Scylla with 100k URL lookups at once.
 const BATCH_SIZE: usize = 100;
 const BATCH_TIMEOUT: Duration = Duration::from_millis(200);
 
@@ -23,7 +21,7 @@ struct WorkItem {
     result: CrawlResult,
 }
 
-// Global Stats for the Monitoring Thread
+
 struct Stats {
     processed: AtomicUsize,
     queued: AtomicUsize,
@@ -62,10 +60,8 @@ async fn main() {
 
     let (tx, mut rx) = mpsc::channel::<WorkItem>(10_000);
 
-    // Global State
     let global_quota_tracker: Arc<Mutex<HashMap<String, i64>>> = Arc::new(Mutex::new(HashMap::new()));
 
-    // Stats
     let stats = Arc::new(Stats {
         processed: AtomicUsize::new(0),
         queued: AtomicUsize::new(0),
@@ -73,7 +69,7 @@ async fn main() {
         dropped_dupe: AtomicUsize::new(0),
     });
 
-    // --- 1. MONITORING TASK (So you know it's not dead) ---
+    // --- 1. MONITORING TASK ---
     let stats_monitor = stats.clone();
     tokio::spawn(async move {
         loop {
