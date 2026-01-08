@@ -86,14 +86,14 @@ async fn main() {
         .expect("Failed to connect to Scylla");
 
     session.query_unpaged("CREATE KEYSPACE IF NOT EXISTS Arachne WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}", &[]).await.ok();
-    session.query_unpaged("CREATE TABLE IF NOT EXISTS Arachne.domain_labels (domain TEXT PRIMARY KEY, is_phishing BOOLEAN, source TEXT)", &[]).await.unwrap();
+    session.query_unpaged("CREATE TABLE IF NOT EXISTS Arachne.domain_labels (url TEXT PRIMARY KEY, is_phishing BOOLEAN, source TEXT)", &[]).await.unwrap();
 
     let insert_stmt = Arc::new(session.prepare(
-        "INSERT INTO Arachne.domain_labels (domain, is_phishing, source) VALUES (?, ?, ?)"
+        "INSERT INTO Arachne.domain_labels (url, is_phishing, source) VALUES (?, ?, ?)"
     ).await.unwrap());
 
     let check_stmt = Arc::new(session.prepare(
-        "SELECT domain FROM Arachne.domain_labels WHERE domain = ?"
+        "SELECT url FROM Arachne.domain_labels WHERE url = ?"
     ).await.unwrap());
 
     println!("✔ Scylla Ready.");
@@ -103,9 +103,13 @@ async fn main() {
         .set("bootstrap.servers", &bootstrap_servers)
         .set("message.timeout.ms", "5000")
         .set("queue.buffering.max.messages", "100000")
+        .set("socket.keepalive.enable", "true")
+        .set("socket.nagle.disable", "true")
+        .set("message.timeout.ms", "300000") // 5 minutes (allow for network blips)
         .set("compression.type", "lz4")
         .create_with_context(LoggingContext)
         .expect("Failed to create Kafka producer");
+
     println!("✔ Kafka Ready.");
 
     let start_time = Instant::now();
@@ -118,7 +122,7 @@ async fn main() {
     process_text_file("phishing.txt", &producer, &session, &insert_stmt, &check_stmt, topic_name, true, PHISHING_TXT_LIMIT).await;
 
     println!("\n[5/5] Processing Legit CSV (Limit: {})...", if LEGIT_CSV_LIMIT == 0 { "ALL".to_string() } else { LEGIT_CSV_LIMIT.to_string() });
-    //process_csv("legit.csv", &producer, &session, &insert_stmt, &check_stmt, topic_name, false, LEGIT_CSV_LIMIT).await;
+    process_csv("legit.csv", &producer, &session, &insert_stmt, &check_stmt, topic_name, false, LEGIT_CSV_LIMIT).await;
 
     println!("\n[...] Flushing Kafka buffers (waiting 10s)...");
     producer.flush(Duration::from_secs(10));
@@ -126,6 +130,7 @@ async fn main() {
     println!("\n✔ All Done. Total Runtime: {:.2?}", start_time.elapsed());
 }
 
+/*
 async fn submit_url_to_system(
     url_raw: &str,
     is_phishing: bool,
@@ -144,7 +149,7 @@ async fn submit_url_to_system(
 
     let root_domain = extract_root_domain(&full_url);
 
-
+    // 1. Check if exists (Read) - LOGIC PRESERVED
     match session.execute_unpaged(check_stmt, (&root_domain,)).await {
         Ok(result) => {
             if let Ok(rows) = result.into_rows_result() {
@@ -159,18 +164,95 @@ async fn submit_url_to_system(
         }
     }
 
+    // 2. Insert into DB (Write) - LOGIC PRESERVED
     if let Err(e) = session.execute_unpaged(insert_stmt, (&root_domain, is_phishing, source_tag)).await {
         eprintln!("DB Write Error {}: {}", root_domain, e);
     }
 
-    if let Err(_) = producer.send(
-        BaseRecord::to(topic).payload(&full_url).key(&root_domain),
-    ) {
-        eprintln!("Kafka Buffer Full!");
+    // 3. Send to Kafka with BACKPRESSURE (Fixing Buffer Full)
+    loop {
+        let record = BaseRecord::to(topic).payload(&full_url).key(&root_domain);
+
+        match producer.send(record) {
+            Ok(_) => break, // Successfully enqueued
+            Err((rdkafka::error::KafkaError::MessageProduction(rdkafka::error::RDKafkaErrorCode::QueueFull), _)) => {
+                // Buffer is full. Poll to allow the driver to send batch and free space.
+                // This slows down the loop to match Redpanda's speed.
+                producer.poll(Duration::from_millis(50));
+            },
+            Err((e, _)) => {
+                eprintln!("Kafka Critical Error sending {}: {:?}", full_url, e);
+                break; // Stop retrying on fatal errors
+            }
+        }
     }
 
     true
 }
+ */
+
+async fn submit_url_to_system(
+    url_raw: &str,
+    is_phishing: bool,
+    source_tag: &str,
+    session: &Session,
+    insert_stmt: &scylla::statement::prepared::PreparedStatement,
+    check_stmt: &scylla::statement::prepared::PreparedStatement,
+    producer: &LoggingProducer,
+    topic: &str
+) -> bool {
+    // 1. Standardize the URL (ensure https://)
+    let full_url = if !url_raw.contains("://") {
+        format!("https://{}", url_raw)
+    } else {
+        url_raw.to_string()
+    };
+
+    // We still calculate root_domain for Kafka Partitioning (Load Balancing)
+    // allowing the Coordinator to throttle by site later.
+    let root_domain = extract_root_domain(&full_url);
+
+    // 2. CHECK: Use the FULL URL for the DB check (Fixes the "Duplicate" issue)
+    match session.execute_unpaged(check_stmt, (&full_url,)).await {
+        Ok(result) => {
+            if let Ok(rows) = result.into_rows_result() {
+                if rows.rows_num() > 0 {
+                    return false; // Actually exists
+                }
+            }
+        },
+        Err(e) => {
+            eprintln!("DB Read Error {}: {}", full_url, e);
+            return false;
+        }
+    }
+
+    // 3. WRITE: Insert the FULL URL into the DB
+    if let Err(e) = session.execute_unpaged(insert_stmt, (&full_url, is_phishing, source_tag)).await {
+        eprintln!("DB Write Error {}: {}", full_url, e);
+    }
+
+    // 4. KAFKA: Send with Backpressure
+    loop {
+        // Payload = Full URL
+        // Key = Root Domain (Keeps all 'blogspot.com' URLs on the same partition for throttling)
+        let record = BaseRecord::to(topic).payload(&full_url).key(&root_domain);
+
+        match producer.send(record) {
+            Ok(_) => break,
+            Err((rdkafka::error::KafkaError::MessageProduction(rdkafka::error::RDKafkaErrorCode::QueueFull), _)) => {
+                producer.poll(Duration::from_millis(50));
+            },
+            Err((e, _)) => {
+                eprintln!("Kafka Critical Error: {:?}", e);
+                break;
+            }
+        }
+    }
+
+    true
+}
+
 
 async fn process_text_file(
     filename: &str,

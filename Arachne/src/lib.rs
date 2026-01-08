@@ -7,8 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 pub mod data_cleaning;
 pub mod db;
-use wreq::{Client, ClientBuilder};
-use wreq_util::Emulation;
+use reqwest::{Client, header};
 use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,13 +40,6 @@ impl CrawlStatus {
             CrawlStatus::InvalidContentType => 1000,
         }
     }
-}
-
-pub fn client() {
-    let http_client = Client::builder()
-        .emulation(Emulation::Chrome137)
-        .build()
-        .unwrap();
 }
 
 pub fn get_domain(url_str: &str) -> Option<String> {

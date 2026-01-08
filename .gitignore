@@ -5,3 +5,12 @@
 Arachne/.env
 *.exe
 Arachne/*.exe
+*.parquet
+/Arachne/*.parquet
+*.txt
+*.csv
+/Arachne/*.txt
+/Arachne/*.csv
+
+git config --global user.name "Your Name"
+git config --global user.email "your_email@example.com"

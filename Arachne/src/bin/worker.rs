@@ -121,6 +121,9 @@ async fn main() {
         .set("auto.offset.reset", "earliest")
         .set("enable.auto.commit", "true")
         .set("auto.commit.interval.ms", "5000")
+        .set("socket.keepalive.enable", "true") // Vital for long-lived VPN connections
+        .set("socket.nagle.disable", "true")    // Lower latency
+        .set("metadata.request.timeout.ms", "60000") // Higher timeout for remote handshake
         .set("fetch.min.bytes", "1000000")
         .create()
         .expect("Consumer creation failed");
@@ -133,6 +136,9 @@ async fn main() {
         .set("queue.buffering.max.messages", "2000")
         .set("message.max.bytes", "524288000")
         .set("compression.type", "lz4")
+        .set("socket.keepalive.enable", "true")
+        .set("socket.nagle.disable", "true")
+        .set("message.timeout.ms", "300000") // 5 minutes (allow for network blips)
         .set("acks", "1")
         .create()
         .expect("Producer creation failed");

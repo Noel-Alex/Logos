@@ -261,7 +261,7 @@ async fn submit_url_to_system(
     let root_domain = extract_root_domain(&full_url);
 
     // 1. CHECK EXISTENCE
-    match session.execute_unpaged(check_stmt, (&root_domain,)).await {
+    match session.execute_unpaged(check_stmt, (&full_url,)).await {
         Ok(result) => {
             if let Ok(rows) = result.into_rows_result() {
                 if rows.rows_num() > 0 {
